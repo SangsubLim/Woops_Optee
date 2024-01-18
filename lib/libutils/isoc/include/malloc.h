@@ -1,38 +1,29 @@
+/* SPDX-License-Identifier: BSD-2-Clause */
 /*
  * Copyright (c) 2014, STMicroelectronics International N.V.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice,
- * this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- * this list of conditions and the following disclaimer in the documentation
- * and/or other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
  */
-#ifndef MALLOC_H
-#define MALLOC_H
+#ifndef __MALLOC_H
+#define __MALLOC_H
 
+#include <pta_stats.h>
 #include <stddef.h>
 #include <types_ext.h>
 
-extern unsigned int __malloc_spinlock;
+/*
+ * Due to bget implementation, the first memory pool registered shall have
+ * a min size. Choose 1kB which is reasonable.
+ */
+#define MALLOC_INITIAL_POOL_MIN_SIZE	1024
 
+void *malloc(size_t size);
+void *calloc(size_t nmemb, size_t size);
+void *realloc(void *ptr, size_t size);
+void *memalign(size_t alignment, size_t size);
 void free(void *ptr);
+
+#if __STDC_VERSION__ >= 201112L
+void *aligned_alloc(size_t alignment, size_t size);
+#endif
 
 #ifdef ENABLE_MDBG
 
@@ -40,7 +31,12 @@ void *mdbg_malloc(const char *fname, int lineno, size_t size);
 void *mdbg_calloc(const char *fname, int lineno, size_t nmemb, size_t size);
 void *mdbg_realloc(const char *fname, int lineno, void *ptr, size_t size);
 void *mdbg_memalign(const char *fname, int lineno, size_t alignment,
-		size_t size);
+		    size_t size);
+
+#if __STDC_VERSION__ >= 201112L
+void *mdbg_aligned_alloc(const char *fname, int lineno, size_t alignment,
+			 size_t size);
+#endif
 
 void mdbg_check(int bufdump);
 
@@ -52,17 +48,16 @@ void mdbg_check(int bufdump);
 #define memalign(alignment, size) \
 		mdbg_memalign(__FILE__, __LINE__, (alignment), (size))
 
-#else
+#if __STDC_VERSION__ >= 201112L
+#define aligned_alloc(alignment, size) \
+		mdbg_aligned_alloc(__FILE__, __LINE__, (alignment), (size))
+#endif /* __STDC_VERSION__ */
 
-void *malloc(size_t size);
-void *calloc(size_t nmemb, size_t size);
-void *realloc(void *ptr, size_t size);
-void *memalign(size_t alignment, size_t size);
+#else
 
 #define mdbg_check(x)        do { } while (0)
 
 #endif
-
 
 /*
  * Returns true if the supplied memory area is within a buffer
@@ -86,23 +81,88 @@ bool malloc_buffer_overlaps_heap(void *buf, size_t len);
 void malloc_add_pool(void *buf, size_t len);
 
 #ifdef CFG_WITH_STATS
+/* Get/reset allocation statistics */
+void malloc_get_stats(struct pta_stats_alloc *stats);
+void malloc_reset_stats(void);
+#endif /* CFG_WITH_STATS */
+
+
+#ifdef CFG_NS_VIRTUALIZATION
+
+void nex_free(void *ptr);
+
+#ifdef ENABLE_MDBG
+
+void *nex_mdbg_malloc(const char *fname, int lineno, size_t size);
+void *nex_mdbg_calloc(const char *fname, int lineno, size_t nmemb, size_t size);
+void *nex_mdbg_realloc(const char *fname, int lineno, void *ptr, size_t size);
+void *nex_mdbg_memalign(const char *fname, int lineno, size_t alignment,
+			size_t size);
+
+void nex_mdbg_check(int bufdump);
+
+#define nex_malloc(size)	nex_mdbg_malloc(__FILE__, __LINE__, (size))
+#define nex_calloc(nmemb, size) \
+		nex_mdbg_calloc(__FILE__, __LINE__, (nmemb), (size))
+#define nex_realloc(ptr, size) \
+		nex_mdbg_realloc(__FILE__, __LINE__, (ptr), (size))
+#define nex_memalign(alignment, size) \
+		nex_mdbg_memalign(__FILE__, __LINE__, (alignment), (size))
+
+#else /* ENABLE_MDBG */
+
+void *nex_malloc(size_t size);
+void *nex_calloc(size_t nmemb, size_t size);
+void *nex_realloc(void *ptr, size_t size);
+void *nex_memalign(size_t alignment, size_t size);
+
+#define nex_mdbg_check(x)        do { } while (0)
+
+#endif /* ENABLE_MDBG */
+
+bool nex_malloc_buffer_is_within_alloced(void *buf, size_t len);
+bool nex_malloc_buffer_overlaps_heap(void *buf, size_t len);
+void nex_malloc_add_pool(void *buf, size_t len);
+
+#ifdef CFG_WITH_STATS
 /*
  * Get/reset allocation statistics
  */
 
-#define TEE_ALLOCATOR_DESC_LENGTH 32
-struct malloc_stats {
-	char desc[TEE_ALLOCATOR_DESC_LENGTH];
-	uint32_t allocated;               /* Bytes currently allocated */
-	uint32_t max_allocated;           /* Tracks max value of allocated */
-	uint32_t size;                    /* Total size for this allocator */
-	uint32_t num_alloc_fail;          /* Number of failed alloc requests */
-	uint32_t biggest_alloc_fail;      /* Size of biggest failed alloc */
-	uint32_t biggest_alloc_fail_used; /* Alloc bytes when above occurred */
-};
+void nex_malloc_get_stats(struct pta_stats_alloc *stats);
+void nex_malloc_reset_stats(void);
 
-void malloc_get_stats(struct malloc_stats *stats);
-void malloc_reset_stats(void);
-#endif /* CFG_WITH_STATS */
+#endif	/* CFG_WITH_STATS */
+#else  /* CFG_NS_VIRTUALIZATION */
 
-#endif /* MALLOC_H */
+#define nex_free(ptr) free(ptr)
+#define nex_malloc(size) malloc(size)
+#define nex_calloc(nmemb, size) calloc(nmemb, size)
+#define nex_realloc(ptr, size) realloc(ptr, size)
+#define nex_memalign(alignment, size) memalign(alignment, size)
+
+#endif	/* CFG_NS_VIRTUALIZATION */
+
+struct malloc_ctx;
+void *raw_memalign(size_t hdr_size, size_t ftr_size, size_t alignment,
+		   size_t pl_size, struct malloc_ctx *ctx);
+void *raw_malloc(size_t hdr_size, size_t ftr_size, size_t pl_size,
+		 struct malloc_ctx *ctx);
+void raw_free(void *ptr, struct malloc_ctx *ctx, bool wipe);
+void *raw_calloc(size_t hdr_size, size_t ftr_size, size_t pl_nmemb,
+		 size_t pl_size, struct malloc_ctx *ctx);
+void *raw_realloc(void *ptr, size_t hdr_size, size_t ftr_size,
+		  size_t pl_size, struct malloc_ctx *ctx);
+size_t raw_malloc_get_ctx_size(void);
+void raw_malloc_init_ctx(struct malloc_ctx *ctx);
+void raw_malloc_add_pool(struct malloc_ctx *ctx, void *buf, size_t len);
+bool raw_malloc_buffer_overlaps_heap(struct malloc_ctx *ctx,
+				     void *buf, size_t len);
+bool raw_malloc_buffer_is_within_alloced(struct malloc_ctx *ctx,
+					 void *buf, size_t len);
+#ifdef CFG_WITH_STATS
+void raw_malloc_get_stats(struct malloc_ctx *ctx,
+			  struct pta_stats_alloc *stats);
+#endif
+
+#endif /* __MALLOC_H */

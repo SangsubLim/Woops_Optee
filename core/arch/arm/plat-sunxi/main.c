@@ -1,5 +1,8 @@
+// SPDX-License-Identifier: BSD-2-Clause
 /*
  * Copyright (c) 2014, Allwinner Technology Co., Ltd.
+ * Copyright (c) 2018, Linaro Limited
+ * Copyright (c) 2018, Amit Singh Tomar <amittomer25@gmail.com>
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -25,153 +28,152 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include <platform_config.h>
-
+#include <console.h>
+#include <io.h>
 #include <stdint.h>
-#include <string.h>
-#include <assert.h>
-
-#include <sm/sm.h>
-#include <sm/tee_mon.h>
-#include <sm/optee_smc.h>
-#include <optee_msg.h>
-
-#include <arm.h>
-#include <kernel/thread.h>
-#include <kernel/time_source.h>
-#include <kernel/panic.h>
-#include <kernel/pm_stubs.h>
+#include <drivers/gic.h>
+#include <drivers/serial8250_uart.h>
+#include <drivers/tzc380.h>
+#include <kernel/boot.h>
 #include <kernel/misc.h>
-#include <mm/tee_mmu.h>
+#include <kernel/panic.h>
+#include <kernel/tz_ssvce_def.h>
 #include <mm/core_mmu.h>
-#include <tee/entry_std.h>
-#include <tee/entry_fast.h>
-#include <platform.h>
-#include <util.h>
-#include <trace.h>
-#include <malloc.h>
+#include <mm/core_memprot.h>
+#include <mm/tee_pager.h>
+#include <platform_config.h>
+#include <sm/optee_smc.h>
 
-/* teecore heap address/size is defined in scatter file */
-extern unsigned char teecore_heap_start;
-extern unsigned char teecore_heap_end;
-
-static void main_fiq(void);
-static void main_tee_entry_std(struct thread_smc_args *args);
-static void main_tee_entry_fast(struct thread_smc_args *args);
-
-static const struct thread_handlers handlers = {
-	.std_smc = main_tee_entry_std,
-	.fast_smc = main_tee_entry_fast,
-	.fiq = main_fiq,
-	.cpu_on = pm_panic,
-	.cpu_off = pm_panic,
-	.cpu_suspend = pm_panic,
-	.cpu_resume = pm_panic,
-	.system_off = pm_panic,
-	.system_reset = pm_panic,
-};
-
-void main_init(uint32_t nsec_entry); /* called from assembly only */
-void main_init(uint32_t nsec_entry)
-{
-	struct sm_nsec_ctx *nsec_ctx;
-	size_t pos = get_core_pos();
-
-	/*
-	 * Mask IRQ and FIQ before switch to the thread vector as the
-	 * thread handler requires IRQ and FIQ to be masked while executing
-	 * with the temporary stack. The thread subsystem also asserts that
-	 * IRQ is blocked when using most if its functions.
-	 */
-	thread_mask_exceptions(THREAD_EXCP_FIQ | THREAD_EXCP_IRQ);
-
-	if (pos == 0) {
-		thread_init_primary(&handlers);
-
-		/* initialize platform */
-		platform_init();
-	}
-
-	thread_init_per_cpu();
-
-	/* Initialize secure monitor */
-	nsec_ctx = sm_get_nsec_ctx();
-	nsec_ctx->mon_lr = nsec_entry;
-	nsec_ctx->mon_spsr = CPSR_MODE_SVC | CPSR_I;
-
-	if (pos == 0) {
-		unsigned long a, s;
-		/* core malloc pool init */
-#ifdef CFG_TEE_MALLOC_START
-		a = CFG_TEE_MALLOC_START;
-		s = CFG_TEE_MALLOC_SIZE;
-#else
-		a = (unsigned long)&teecore_heap_start;
-		s = (unsigned long)&teecore_heap_end;
-		a = ((a + 1) & ~0x0FFFF) + 0x10000;	/* 64kB aligned */
-		s = s & ~0x0FFFF;	/* 64kB aligned */
-		s = s - a;
+#ifdef GIC_BASE
+register_phys_mem_pgdir(MEM_AREA_IO_SEC, GIC_BASE, CORE_MMU_PGDIR_SIZE);
 #endif
-		malloc_add_pool((void *)a, s);
 
-		teecore_init_ta_ram();
+#ifdef CONSOLE_UART_BASE
+register_phys_mem_pgdir(MEM_AREA_IO_NSEC,
+			CONSOLE_UART_BASE, SUNXI_UART_REG_SIZE);
+#endif
 
-		if (init_teecore() != TEE_SUCCESS) {
-			panic();
-		}
-	}
+#ifdef SUNXI_TZPC_BASE
+register_phys_mem_pgdir(MEM_AREA_IO_SEC, SUNXI_TZPC_BASE, SUNXI_TZPC_REG_SIZE);
+#define REG_TZPC_SMTA_DECPORT0_STA_REG      (0x0004)
+#define REG_TZPC_SMTA_DECPORT0_SET_REG      (0x0008)
+#define REG_TZPC_SMTA_DECPORT0_CLR_REG      (0x000C)
+#define REG_TZPC_SMTA_DECPORT1_STA_REG      (0x0010)
+#define REG_TZPC_SMTA_DECPORT1_SET_REG      (0x0014)
+#define REG_TZPC_SMTA_DECPORT1_CLR_REG      (0x0018)
+#define REG_TZPC_SMTA_DECPORT2_STA_REG      (0x001c)
+#define REG_TZPC_SMTA_DECPORT2_SET_REG      (0x0020)
+#define REG_TZPC_SMTA_DECPORT2_CLR_REG      (0x0024)
+#endif
 
-	IMSG("optee initialize finished\n");
+#ifdef SUNXI_CPUCFG_BASE
+register_phys_mem_pgdir(MEM_AREA_IO_SEC, SUNXI_CPUCFG_BASE,
+			SUNXI_CPUCFG_REG_SIZE);
+#endif
+
+#ifdef SUNXI_PRCM_BASE
+register_phys_mem_pgdir(MEM_AREA_IO_SEC, SUNXI_PRCM_BASE, SUNXI_PRCM_REG_SIZE);
+#endif
+
+#ifdef CFG_TZC380
+vaddr_t smc_base(void);
+register_phys_mem_pgdir(MEM_AREA_IO_SEC, SUNXI_SMC_BASE, TZC400_REG_SIZE);
+#define SMC_MASTER_BYPASS 0x18
+#define SMC_MASTER_BYPASS_EN_MASK 0x1
+#endif
+
+#ifdef SUNXI_TZPC_BASE
+static void tzpc_init(void);
+#endif
+
+static struct serial8250_uart_data console_data;
+
+void console_init(void)
+{
+	serial8250_uart_init(&console_data,
+			     CONSOLE_UART_BASE,
+			     CONSOLE_UART_CLK_IN_HZ,
+			     CONSOLE_BAUDRATE);
+	register_serial_console(&console_data.chip);
 }
 
-static void main_fiq(void)
+#ifdef SUNXI_TZPC_BASE
+static void tzpc_init(void)
 {
-	panic();
+	vaddr_t v = (vaddr_t)phys_to_virt(SUNXI_TZPC_BASE, MEM_AREA_IO_SEC,
+					  SUNXI_TZPC_REG_SIZE);
+
+	DMSG("SMTA_DECPORT0=%x", io_read32(v + REG_TZPC_SMTA_DECPORT0_STA_REG));
+	DMSG("SMTA_DECPORT1=%x", io_read32(v + REG_TZPC_SMTA_DECPORT1_STA_REG));
+	DMSG("SMTA_DECPORT2=%x", io_read32(v + REG_TZPC_SMTA_DECPORT2_STA_REG));
+
+	/* Allow all peripherals for normal world */
+	io_write32(v + REG_TZPC_SMTA_DECPORT0_SET_REG, 0xbe);
+	io_write32(v + REG_TZPC_SMTA_DECPORT1_SET_REG, 0xff);
+	io_write32(v + REG_TZPC_SMTA_DECPORT2_SET_REG, 0x7f);
+
+	DMSG("SMTA_DECPORT0=%x", io_read32(v + REG_TZPC_SMTA_DECPORT0_STA_REG));
+	DMSG("SMTA_DECPORT1=%x", io_read32(v + REG_TZPC_SMTA_DECPORT1_STA_REG));
+	DMSG("SMTA_DECPORT2=%x", io_read32(v + REG_TZPC_SMTA_DECPORT2_STA_REG));
+}
+#else
+static inline void tzpc_init(void)
+{
+}
+#endif /* SUNXI_TZPC_BASE */
+
+#ifndef CFG_WITH_ARM_TRUSTED_FW
+void boot_primary_init_intc(void)
+{
+	gic_init(GIC_BASE + GICC_OFFSET, GIC_BASE + GICD_OFFSET);
 }
 
-static void main_tee_entry_fast(struct thread_smc_args *args)
+void boot_secondary_init_intc(void)
 {
-	/* TODO move to main_init() */
-	if (init_teecore() != TEE_SUCCESS)
+	gic_init_per_cpu();
+}
+#endif
+
+#ifdef ARM32
+void plat_primary_init_early(void)
+{
+	assert(!cpu_mmu_enabled());
+
+	tzpc_init();
+}
+#endif
+
+/*
+ * Allwinner's A64 has TZC380 like controller called SMC that can
+ * be programmed to protect parts of DRAM from non-secure world.
+ */
+#ifdef CFG_TZC380
+vaddr_t smc_base(void)
+{
+	return (vaddr_t)phys_to_virt(SUNXI_SMC_BASE, MEM_AREA_IO_SEC,
+				     TZC400_REG_SIZE);
+}
+
+static TEE_Result smc_init(void)
+{
+	vaddr_t base = smc_base();
+
+	if (!base) {
+		EMSG("smc not mapped");
 		panic();
-
-	/* SiP Service Call Count */
-	if (args->a0 == OPTEE_SMC_SIP_SUNXI_CALLS_COUNT) {
-		args->a0 = 1;
-		return;
 	}
 
-	/*  SiP Service Call UID */
-	if (args->a0 == OPTEE_SMC_SIP_SUNXI_CALLS_UID) {
-		args->a0 = OPTEE_SMC_SIP_SUNXI_UID_R0;
-		args->a1 = OPTEE_SMC_SIP_SUNXI_UID_R1;
-		args->a2 = OPTEE_SMC_SIP_SUNXI_UID_R2;
-		args->a3 = OPTEE_SMC_SIP_SUNXI_UID_R3;
-		return;
-	}
+	tzc_init(base);
+	tzc_configure_region(0, 0x0, TZC_ATTR_REGION_SIZE(TZC_REGION_SIZE_1G) |
+			     TZC_ATTR_REGION_EN_MASK | TZC_ATTR_SP_ALL);
+	tzc_configure_region(1, 0x0, TZC_ATTR_REGION_SIZE(TZC_REGION_SIZE_32M) |
+			     TZC_ATTR_REGION_EN_MASK | TZC_ATTR_SP_S_RW);
 
-	/* SiP Service Calls */
-	if (args->a0 == OPTEE_SMC_OPTEE_FAST_CALL_SIP_SUNXI) {
-		platform_smc_handle(args);
-		return;
-	}
+	/* SoC specific bits */
+	io_clrbits32(base + SMC_MASTER_BYPASS, SMC_MASTER_BYPASS_EN_MASK);
 
-	tee_entry_fast(args);
+	return TEE_SUCCESS;
 }
 
-
-
-static void main_tee_entry_std(struct thread_smc_args *args)
-{
-	/* TODO move to main_init() */
-	if (init_teecore() != TEE_SUCCESS)
-		panic();
-
-	tee_entry_std(args);
-}
-
-/* main_tee_entry_fast() supports 3 platform-specific functions */
-void tee_entry_get_api_call_count(struct thread_smc_args *args)
-{
-	args->a0 = tee_entry_generic_get_api_call_count() + 3;
-}
+driver_init(smc_init);
+#endif /* CFG_TZC380 */

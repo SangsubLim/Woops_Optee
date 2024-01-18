@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: BSD-2-Clause */
 /*
  * Copyright (c) 2016, Sequitur Labs Inc. All rights reserved.
  * All rights reserved.
@@ -28,6 +29,8 @@
 #ifndef PLATFORM_CONFIG_H
 #define PLATFORM_CONFIG_H
 
+#include <mm/generic_ram_layout.h>
+
 /* Make stacks aligned to data cache line length */
 #define STACK_ALIGNMENT		64
 
@@ -52,7 +55,7 @@
  *  0x0a00_0000
  *    TA RAM: 16 MiB                          |
  *  0x0842_0000                               | TZDRAM
- *    TEE RAM: 4 MiB (CFG_TEE_RAM_VA_SIZE)    |
+ *    TEE RAM: 4 MiB (TEE_RAM_VA_SIZE)	      |
  *  0x0840_0000 [ARM Trusted Firmware       ] -
  *  0x0840_0000 [TZDRAM_BASE, BL32_LOAD_ADDR] -
  *    Shared memory: 4 MiB                    |
@@ -64,32 +67,5 @@
 
 #define DRAM0_BASE		0x00000000
 #define DRAM0_SIZE		0x40000000
-
-/* Below ARM-TF */
-#define CFG_SHMEM_START		(0x08000000)
-#define CFG_SHMEM_SIZE		(4 * 1024 * 1024)
-
-#define TZDRAM_BASE		(CFG_SHMEM_START + CFG_SHMEM_SIZE)
-#define TZDRAM_SIZE		(32 * 1024 * 1024)
-
-#define CFG_TEE_CORE_NB_CORE	4
-
-#define CFG_TEE_RAM_VA_SIZE	(4 * 1024 * 1024)
-
-#define CFG_TEE_LOAD_ADDR	(TZDRAM_BASE + 0x20000)
-
-#define CFG_TEE_RAM_PH_SIZE	CFG_TEE_RAM_VA_SIZE
-#define CFG_TEE_RAM_START	TZDRAM_BASE
-
-#define CFG_TA_RAM_START	ROUNDUP((TZDRAM_BASE + CFG_TEE_RAM_VA_SIZE), \
-					CORE_MMU_DEVICE_SIZE)
-
-# define CFG_TA_RAM_SIZE        (16 * 1024 * 1024)
-
-#define DEVICE0_BASE		ROUNDDOWN(CONSOLE_UART_BASE, \
-					  CORE_MMU_DEVICE_SIZE)
-#define DEVICE0_PA_BASE         DEVICE0_BASE
-#define DEVICE0_SIZE		CORE_MMU_DEVICE_SIZE
-#define DEVICE0_TYPE		MEM_AREA_IO_NSEC
 
 #endif /* PLATFORM_CONFIG_H */

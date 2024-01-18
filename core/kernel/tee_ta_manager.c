@@ -1,64 +1,79 @@
+// SPDX-License-Identifier: BSD-2-Clause
 /*
  * Copyright (c) 2014, STMicroelectronics International N.V.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice,
- * this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- * this list of conditions and the following disclaimer in the documentation
- * and/or other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
+ * Copyright (c) 2020, Arm Limited
  */
 
-#include <types_ext.h>
-#include <stdbool.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <arm.h>
 #include <assert.h>
 #include <kernel/mutex.h>
 #include <kernel/panic.h>
-#include <kernel/static_ta.h>
+#include <kernel/pseudo_ta.h>
+#include <kernel/stmm_sp.h>
 #include <kernel/tee_common.h>
 #include <kernel/tee_misc.h>
 #include <kernel/tee_ta_manager.h>
 #include <kernel/tee_time.h>
 #include <kernel/thread.h>
+#include <kernel/user_mode_ctx.h>
 #include <kernel/user_ta.h>
-#include <mm/core_mmu.h>
+#include <malloc.h>
 #include <mm/core_memprot.h>
-#include <mm/tee_mmu.h>
-#include <tee/tee_svc_cryp.h>
-#include <tee/tee_obj.h>
-#include <tee/tee_svc_storage.h>
+#include <mm/core_mmu.h>
+#include <mm/mobj.h>
+#include <mm/vm.h>
+#include <pta_stats.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <tee_api_types.h>
+#include <tee/entry_std.h>
+#include <tee/tee_obj.h>
+#include <tee/tee_svc_cryp.h>
+#include <tee/tee_svc_storage.h>
 #include <trace.h>
+#include <types_ext.h>
+#include <user_ta_header.h>
 #include <utee_types.h>
 #include <util.h>
 
+#if defined(CFG_TA_STATS)
+#define MAX_DUMP_SESS_NUM	(16)
+
+struct tee_ta_dump_ctx {
+	TEE_UUID uuid;
+	uint32_t panicked;
+	bool is_user_ta;
+	uint32_t sess_num;
+	uint32_t sess_id[MAX_DUMP_SESS_NUM];
+};
+#endif
+
 /* This mutex protects the critical section in tee_ta_init_session */
 struct mutex tee_ta_mutex = MUTEX_INITIALIZER;
-static struct condvar tee_ta_cv = CONDVAR_INITIALIZER;
-static int tee_ta_single_instance_thread = THREAD_ID_INVALID;
-static size_t tee_ta_single_instance_count;
+/* This condvar is used when waiting for a TA context to become initialized */
+struct condvar tee_ta_init_cv = CONDVAR_INITIALIZER;
 struct tee_ta_ctx_head tee_ctxes = TAILQ_HEAD_INITIALIZER(tee_ctxes);
 
+#ifndef CFG_CONCURRENT_SINGLE_INSTANCE_TA
+static struct condvar tee_ta_cv = CONDVAR_INITIALIZER;
+static short int tee_ta_single_instance_thread = THREAD_ID_INVALID;
+static size_t tee_ta_single_instance_count;
+#endif
+
+#ifdef CFG_CONCURRENT_SINGLE_INSTANCE_TA
+static void lock_single_instance(void)
+{
+}
+
+static void unlock_single_instance(void)
+{
+}
+
+static bool has_single_instance_lock(void)
+{
+	return false;
+}
+#else
 static void lock_single_instance(void)
 {
 	/* Requires tee_ta_mutex to be held */
@@ -92,10 +107,31 @@ static bool has_single_instance_lock(void)
 	/* Requires tee_ta_mutex to be held */
 	return tee_ta_single_instance_thread == thread_get_id();
 }
+#endif
+
+struct tee_ta_session *__noprof to_ta_session(struct ts_session *sess)
+{
+	assert(is_ta_ctx(sess->ctx) || is_stmm_ctx(sess->ctx));
+	return container_of(sess, struct tee_ta_session, ts_sess);
+}
+
+static struct tee_ta_ctx *ts_to_ta_ctx(struct ts_ctx *ctx)
+{
+	if (is_ta_ctx(ctx))
+		return to_ta_ctx(ctx);
+
+	if (is_stmm_ctx(ctx))
+		return &(to_stmm_ctx(ctx)->ta_ctx);
+
+	panic("bad context");
+}
 
 static bool tee_ta_try_set_busy(struct tee_ta_ctx *ctx)
 {
 	bool rc = true;
+
+	if (ctx->flags & TA_FLAG_CONCURRENT)
+		return true;
 
 	mutex_lock(&tee_ta_mutex);
 
@@ -137,6 +173,9 @@ static void tee_ta_set_busy(struct tee_ta_ctx *ctx)
 
 static void tee_ta_clear_busy(struct tee_ta_ctx *ctx)
 {
+	if (ctx->flags & TA_FLAG_CONCURRENT)
+		return;
+
 	mutex_lock(&tee_ta_mutex);
 
 	assert(ctx->busy);
@@ -170,16 +209,34 @@ void tee_ta_put_session(struct tee_ta_session *s)
 	mutex_unlock(&tee_ta_mutex);
 }
 
-static struct tee_ta_session *find_session(uint32_t id,
+static struct tee_ta_session *tee_ta_find_session_nolock(uint32_t id,
 			struct tee_ta_session_head *open_sessions)
 {
-	struct tee_ta_session *s;
+	struct tee_ta_session *s = NULL;
+	struct tee_ta_session *found = NULL;
 
 	TAILQ_FOREACH(s, open_sessions, link) {
-		if ((vaddr_t)s == id)
-			return s;
+		if (s->id == id) {
+			found = s;
+			break;
+		}
 	}
-	return NULL;
+
+	return found;
+}
+
+struct tee_ta_session *tee_ta_find_session(uint32_t id,
+			struct tee_ta_session_head *open_sessions)
+{
+	struct tee_ta_session *s = NULL;
+
+	mutex_lock(&tee_ta_mutex);
+
+	s = tee_ta_find_session_nolock(id, open_sessions);
+
+	mutex_unlock(&tee_ta_mutex);
+
+	return s;
 }
 
 struct tee_ta_session *tee_ta_get_session(uint32_t id, bool exclusive,
@@ -190,7 +247,7 @@ struct tee_ta_session *tee_ta_get_session(uint32_t id, bool exclusive,
 	mutex_lock(&tee_ta_mutex);
 
 	while (true) {
-		s = find_session(id, open_sessions);
+		s = tee_ta_find_session_nolock(id, open_sessions);
 		if (!s)
 			break;
 		if (s->unlink) {
@@ -240,6 +297,33 @@ static void tee_ta_unlink_session(struct tee_ta_session *s,
 	mutex_unlock(&tee_ta_mutex);
 }
 
+static void destroy_session(struct tee_ta_session *s,
+			    struct tee_ta_session_head *open_sessions)
+{
+#if defined(CFG_FTRACE_SUPPORT)
+	if (s->ts_sess.ctx && s->ts_sess.ctx->ops->dump_ftrace) {
+		ts_push_current_session(&s->ts_sess);
+		s->ts_sess.fbuf = NULL;
+		s->ts_sess.ctx->ops->dump_ftrace(s->ts_sess.ctx);
+		ts_pop_current_session();
+	}
+#endif
+
+	tee_ta_unlink_session(s, open_sessions);
+#if defined(CFG_TA_GPROF_SUPPORT)
+	free(s->ts_sess.sbuf);
+#endif
+	free(s);
+}
+
+static void destroy_context(struct tee_ta_ctx *ctx)
+{
+	DMSG("Destroy TA ctx (0x%" PRIxVA ")",  (vaddr_t)ctx);
+
+	condvar_destroy(&ctx->busy_cv);
+	ctx->ts_ctx.ops->destroy(&ctx->ts_ctx);
+}
+
 /*
  * tee_ta_context_find - Find TA in session list based on a UUID (input)
  * Returns a pointer to the session
@@ -249,7 +333,7 @@ static struct tee_ta_ctx *tee_ta_context_find(const TEE_UUID *uuid)
 	struct tee_ta_ctx *ctx;
 
 	TAILQ_FOREACH(ctx, &tee_ctxes, link) {
-		if (memcmp(&ctx->uuid, uuid, sizeof(TEE_UUID)) == 0)
+		if (memcmp(&ctx->ts_ctx.uuid, uuid, sizeof(TEE_UUID)) == 0)
 			return ctx;
 	}
 
@@ -277,32 +361,91 @@ static TEE_Result check_client(struct tee_ta_session *s, const TEE_Identity *id)
 	return TEE_SUCCESS;
 }
 
+/*
+ * Check if invocation parameters matches TA properties
+ *
+ * @s - current session handle
+ * @param - already identified memory references hold a valid 'mobj'.
+ *
+ * Policy:
+ * - All TAs can access 'non-secure' shared memory.
+ * - All TAs can access TEE private memory (seccpy)
+ * - Only SDP flagged TAs can accept SDP memory references.
+ */
+#ifndef CFG_SECURE_DATA_PATH
+static bool check_params(struct tee_ta_session *sess __unused,
+			 struct tee_ta_param *param __unused)
+{
+	/*
+	 * When CFG_SECURE_DATA_PATH is not enabled, SDP memory references
+	 * are rejected at OP-TEE core entry. Hence here all TAs have same
+	 * permissions regarding memory reference parameters.
+	 */
+	return true;
+}
+#else
+static bool check_params(struct tee_ta_session *sess,
+			 struct tee_ta_param *param)
+{
+	int n;
+
+	/*
+	 * When CFG_SECURE_DATA_PATH is enabled, OP-TEE entry allows SHM and
+	 * SDP memory references. Only TAs flagged SDP can access SDP memory.
+	 */
+	if (sess->ts_sess.ctx &&
+	    ts_to_ta_ctx(sess->ts_sess.ctx)->flags & TA_FLAG_SECURE_DATA_PATH)
+		return true;
+
+	for (n = 0; n < TEE_NUM_PARAMS; n++) {
+		uint32_t param_type = TEE_PARAM_TYPE_GET(param->types, n);
+		struct param_mem *mem = &param->u[n].mem;
+
+		if (param_type != TEE_PARAM_TYPE_MEMREF_INPUT &&
+		    param_type != TEE_PARAM_TYPE_MEMREF_OUTPUT &&
+		    param_type != TEE_PARAM_TYPE_MEMREF_INOUT)
+			continue;
+		if (!mem->size)
+			continue;
+		if (mobj_is_sdp_mem(mem->mobj))
+			return false;
+	}
+	return true;
+}
+#endif
+
 static void set_invoke_timeout(struct tee_ta_session *sess,
 				      uint32_t cancel_req_to)
 {
 	TEE_Time current_time;
-	TEE_Time cancel_time = { UINT32_MAX, UINT32_MAX };
+	TEE_Time cancel_time;
 
 	if (cancel_req_to == TEE_TIMEOUT_INFINITE)
-		goto out;
+		goto infinite;
 
 	if (tee_time_get_sys_time(&current_time) != TEE_SUCCESS)
-		goto out;
+		goto infinite;
 
-	/* Check that it doesn't wrap */
-	if (current_time.seconds + (cancel_req_to / 1000) >=
-	    current_time.seconds) {
-		cancel_time.seconds =
-		    current_time.seconds + cancel_req_to / 1000;
-		cancel_time.millis = current_time.millis + cancel_req_to % 1000;
-		if (cancel_time.millis > 1000) {
-			cancel_time.seconds++;
-			cancel_time.millis -= 1000;
-		}
+	if (ADD_OVERFLOW(current_time.seconds, cancel_req_to / 1000,
+			 &cancel_time.seconds))
+		goto infinite;
+
+	cancel_time.millis = current_time.millis + cancel_req_to % 1000;
+	if (cancel_time.millis > 1000) {
+		if (ADD_OVERFLOW(current_time.seconds, 1,
+				 &cancel_time.seconds))
+			goto infinite;
+
+		cancel_time.seconds++;
+		cancel_time.millis -= 1000;
 	}
 
-out:
 	sess->cancel_time = cancel_time;
+	return;
+
+infinite:
+	sess->cancel_time.seconds = UINT32_MAX;
+	sess->cancel_time.millis = UINT32_MAX;
 }
 
 /*-----------------------------------------------------------------------------
@@ -312,15 +455,18 @@ TEE_Result tee_ta_close_session(struct tee_ta_session *csess,
 				struct tee_ta_session_head *open_sessions,
 				const TEE_Identity *clnt_id)
 {
-	struct tee_ta_session *sess;
-	struct tee_ta_ctx *ctx;
+	struct tee_ta_session *sess = NULL;
+	struct tee_ta_ctx *ctx = NULL;
+	struct ts_ctx *ts_ctx = NULL;
+	bool keep_alive = false;
 
-	DMSG("tee_ta_close_session(0x%" PRIxVA ")",  (vaddr_t)csess);
+	DMSG("csess 0x%" PRIxVA " id %u",
+	     (vaddr_t)csess, csess ? csess->id : UINT_MAX);
 
 	if (!csess)
 		return TEE_ERROR_ITEM_NOT_FOUND;
 
-	sess = tee_ta_get_session((vaddr_t)csess, true, open_sessions);
+	sess = tee_ta_get_session(csess->id, true, open_sessions);
 
 	if (!sess) {
 		EMSG("session 0x%" PRIxVA " to be removed is not found",
@@ -333,20 +479,24 @@ TEE_Result tee_ta_close_session(struct tee_ta_session *csess,
 		return TEE_ERROR_BAD_PARAMETERS; /* intentional generic error */
 	}
 
-	ctx = sess->ctx;
-	DMSG("   ... Destroy session");
+	DMSG("Destroy session");
 
-	tee_ta_set_busy(ctx);
-
-	if (!ctx->panicked) {
-		set_invoke_timeout(sess, TEE_TIMEOUT_INFINITE);
-		ctx->ops->enter_close_session(sess);
+	ts_ctx = sess->ts_sess.ctx;
+	if (!ts_ctx) {
+		destroy_session(sess, open_sessions);
+		return TEE_SUCCESS;
 	}
 
-	tee_ta_unlink_session(sess, open_sessions);
-	free(sess);
-
-	tee_ta_clear_busy(ctx);
+	ctx = ts_to_ta_ctx(ts_ctx);
+	if (ctx->panicked) {
+		destroy_session(sess, open_sessions);
+	} else {
+		tee_ta_set_busy(ctx);
+		set_invoke_timeout(sess, TEE_TIMEOUT_INFINITE);
+		ts_ctx->ops->enter_close_session(&sess->ts_sess);
+		destroy_session(sess, open_sessions);
+		tee_ta_clear_busy(ctx);
+	}
 
 	mutex_lock(&tee_ta_mutex);
 
@@ -354,25 +504,44 @@ TEE_Result tee_ta_close_session(struct tee_ta_session *csess,
 		panic();
 
 	ctx->ref_count--;
-	if (!ctx->ref_count && !(ctx->flags & TA_FLAG_INSTANCE_KEEP_ALIVE)) {
-		DMSG("   ... Destroy TA ctx");
-
-		TAILQ_REMOVE(&tee_ctxes, ctx, link);
+	keep_alive = (ctx->flags & TA_FLAG_INSTANCE_KEEP_ALIVE) &&
+			(ctx->flags & TA_FLAG_SINGLE_INSTANCE);
+	if (!ctx->ref_count && (ctx->panicked || !keep_alive)) {
+		if (!ctx->is_releasing) {
+			TAILQ_REMOVE(&tee_ctxes, ctx, link);
+			ctx->is_releasing = true;
+		}
 		mutex_unlock(&tee_ta_mutex);
 
-		condvar_destroy(&ctx->busy_cv);
-
-		pgt_flush_ctx(ctx);
-		ctx->ops->destroy(ctx);
+		destroy_context(ctx);
 	} else
 		mutex_unlock(&tee_ta_mutex);
 
 	return TEE_SUCCESS;
 }
 
-static TEE_Result tee_ta_init_session_with_context(struct tee_ta_ctx *ctx,
-			struct tee_ta_session *s)
+static TEE_Result tee_ta_init_session_with_context(struct tee_ta_session *s,
+						   const TEE_UUID *uuid)
 {
+	struct tee_ta_ctx *ctx = NULL;
+
+	while (true) {
+		ctx = tee_ta_context_find(uuid);
+		if (!ctx)
+			return TEE_ERROR_ITEM_NOT_FOUND;
+
+		if (!is_user_ta_ctx(&ctx->ts_ctx) ||
+		    !to_user_ta_ctx(&ctx->ts_ctx)->uctx.is_initializing)
+			break;
+		/*
+		 * Context is still initializing, wait here until it's
+		 * fully initialized. Note that we're searching for the
+		 * context again since it may have been removed while we
+		 * where sleeping.
+		 */
+		condvar_wait(&tee_ta_init_cv, &tee_ta_mutex);
+	}
+
 	/*
 	 * If TA isn't single instance it should be loaded as new
 	 * instance instead of doing anything with this instance.
@@ -384,23 +553,44 @@ static TEE_Result tee_ta_init_session_with_context(struct tee_ta_ctx *ctx,
 
 	/*
 	 * The TA is single instance, if it isn't multi session we
-	 * can't create another session unless it's the first
-	 * new session towards a keepAlive TA.
+	 * can't create another session unless its reference is zero
 	 */
-
-	if (((ctx->flags & TA_FLAG_MULTI_SESSION) == 0) &&
-	    !(((ctx->flags & TA_FLAG_INSTANCE_KEEP_ALIVE) != 0) &&
-	      (ctx->ref_count == 0)))
+	if (!(ctx->flags & TA_FLAG_MULTI_SESSION) && ctx->ref_count)
 		return TEE_ERROR_BUSY;
 
-	DMSG("   ... Re-open TA %pUl", (void *)&ctx->uuid);
+	DMSG("Re-open TA %pUl", (void *)&ctx->ts_ctx.uuid);
 
 	ctx->ref_count++;
-	s->ctx = ctx;
+	s->ts_sess.ctx = &ctx->ts_ctx;
+	s->ts_sess.handle_scall = s->ts_sess.ctx->ops->handle_scall;
 	return TEE_SUCCESS;
 }
 
+static uint32_t new_session_id(struct tee_ta_session_head *open_sessions)
+{
+	struct tee_ta_session *last = NULL;
+	uint32_t saved = 0;
+	uint32_t id = 1;
 
+	last = TAILQ_LAST(open_sessions, tee_ta_session_head);
+	if (last) {
+		/* This value is less likely to be already used */
+		id = last->id + 1;
+		if (!id)
+			id++; /* 0 is not valid */
+	}
+
+	saved = id;
+	do {
+		if (!tee_ta_find_session_nolock(id, open_sessions))
+			return id;
+		id++;
+		if (!id)
+			id++;
+	} while (id != saved);
+
+	return 0;
+}
 
 static TEE_Result tee_ta_init_session(TEE_ErrorOrigin *err,
 				struct tee_ta_session_head *open_sessions,
@@ -408,7 +598,6 @@ static TEE_Result tee_ta_init_session(TEE_ErrorOrigin *err,
 				struct tee_ta_session **sess)
 {
 	TEE_Result res;
-	struct tee_ta_ctx *ctx;
 	struct tee_ta_session *s = calloc(1, sizeof(struct tee_ta_session));
 
 	*err = TEE_ORIGIN_TEE;
@@ -421,27 +610,28 @@ static TEE_Result tee_ta_init_session(TEE_ErrorOrigin *err,
 	s->lock_thread = THREAD_ID_INVALID;
 	s->ref_count = 1;
 
-
-	/*
-	 * We take the global TA mutex here and hold it while doing
-	 * RPC to load the TA. This big critical section should be broken
-	 * down into smaller pieces.
-	 */
-
-
 	mutex_lock(&tee_ta_mutex);
+	s->id = new_session_id(open_sessions);
+	if (!s->id) {
+		res = TEE_ERROR_OVERFLOW;
+		goto err_mutex_unlock;
+	}
+
 	TAILQ_INSERT_TAIL(open_sessions, s, link);
 
 	/* Look for already loaded TA */
-	ctx = tee_ta_context_find(uuid);
-	if (ctx) {
-		res = tee_ta_init_session_with_context(ctx, s);
-		if (res == TEE_SUCCESS || res != TEE_ERROR_ITEM_NOT_FOUND)
-			goto out;
-	}
+	res = tee_ta_init_session_with_context(s, uuid);
+	mutex_unlock(&tee_ta_mutex);
+	if (res == TEE_SUCCESS || res != TEE_ERROR_ITEM_NOT_FOUND)
+		goto out;
 
-	/* Look for static TA */
-	res = tee_ta_init_static_ta_session(uuid, s);
+	/* Look for secure partition */
+	res = stmm_init_session(uuid, s);
+	if (res == TEE_SUCCESS || res != TEE_ERROR_ITEM_NOT_FOUND)
+		goto out;
+
+	/* Look for pseudo TA */
+	res = tee_ta_init_pseudo_ta_session(uuid, s);
 	if (res == TEE_SUCCESS || res != TEE_ERROR_ITEM_NOT_FOUND)
 		goto out;
 
@@ -449,14 +639,34 @@ static TEE_Result tee_ta_init_session(TEE_ErrorOrigin *err,
 	res = tee_ta_init_user_ta_session(uuid, s);
 
 out:
-	if (res == TEE_SUCCESS) {
+	if (!res) {
 		*sess = s;
-	} else {
-		TAILQ_REMOVE(open_sessions, s, link);
-		free(s);
+		return TEE_SUCCESS;
+	}
+
+	mutex_lock(&tee_ta_mutex);
+	TAILQ_REMOVE(open_sessions, s, link);
+err_mutex_unlock:
+	mutex_unlock(&tee_ta_mutex);
+	free(s);
+	return res;
+}
+
+static void release_ta_ctx(struct tee_ta_ctx *ctx)
+{
+	bool was_releasing = false;
+
+	mutex_lock(&tee_ta_mutex);
+	was_releasing = ctx->is_releasing;
+	ctx->is_releasing = true;
+	if (!was_releasing) {
+		DMSG("Releasing panicked TA ctx");
+		TAILQ_REMOVE(&tee_ctxes, ctx, link);
 	}
 	mutex_unlock(&tee_ta_mutex);
-	return res;
+
+	if (!was_releasing)
+		ctx->ts_ctx.ops->release_state(&ctx->ts_ctx);
 }
 
 TEE_Result tee_ta_open_session(TEE_ErrorOrigin *err,
@@ -467,10 +677,11 @@ TEE_Result tee_ta_open_session(TEE_ErrorOrigin *err,
 			       uint32_t cancel_req_to,
 			       struct tee_ta_param *param)
 {
-	TEE_Result res;
+	TEE_Result res = TEE_SUCCESS;
 	struct tee_ta_session *s = NULL;
-	struct tee_ta_ctx *ctx;
-	bool panicked;
+	struct tee_ta_ctx *ctx = NULL;
+	struct ts_ctx *ts_ctx = NULL;
+	bool panicked = false;
 	bool was_busy = false;
 
 	res = tee_ta_init_session(err, open_sessions, uuid, &s);
@@ -479,37 +690,34 @@ TEE_Result tee_ta_open_session(TEE_ErrorOrigin *err,
 		return res;
 	}
 
-	ctx = s->ctx;
+	if (!check_params(s, param))
+		return TEE_ERROR_BAD_PARAMETERS;
 
-	if (ctx->panicked) {
-		DMSG("panicked, call tee_ta_close_session()");
-		tee_ta_close_session(s, open_sessions, KERN_IDENTITY);
-		*err = TEE_ORIGIN_TEE;
-		return TEE_ERROR_TARGET_DEAD;
-	}
+	ts_ctx = s->ts_sess.ctx;
+	ctx = ts_to_ta_ctx(ts_ctx);
 
-	*sess = s;
-	/* Save identity of the owner of the session */
-	s->clnt_id = *clnt_id;
-
-	res = tee_ta_verify_param(s, param);
-	if (res == TEE_SUCCESS) {
-		if (tee_ta_try_set_busy(ctx)) {
+	if (tee_ta_try_set_busy(ctx)) {
+		if (!ctx->panicked) {
+			/* Save identity of the owner of the session */
+			s->clnt_id = *clnt_id;
+			s->param = param;
 			set_invoke_timeout(s, cancel_req_to);
-			res = ctx->ops->enter_open_session(s, param, err);
-			tee_ta_clear_busy(ctx);
-		} else {
-			/* Deadlock avoided */
-			res = TEE_ERROR_BUSY;
-			was_busy = true;
+			res = ts_ctx->ops->enter_open_session(&s->ts_sess);
+			s->param = NULL;
 		}
+
+		panicked = ctx->panicked;
+		if (panicked) {
+			release_ta_ctx(ctx);
+			res = TEE_ERROR_TARGET_DEAD;
+		}
+
+		tee_ta_clear_busy(ctx);
+	} else {
+		/* Deadlock avoided */
+		res = TEE_ERROR_BUSY;
+		was_busy = true;
 	}
-
-	panicked = ctx->panicked;
-
-	tee_ta_put_session(s);
-	if (panicked || (res != TEE_SUCCESS))
-		tee_ta_close_session(s, open_sessions, KERN_IDENTITY);
 
 	/*
 	 * Origin error equal to TEE_ORIGIN_TRUSTED_APP for "regular" error,
@@ -518,10 +726,16 @@ TEE_Result tee_ta_open_session(TEE_ErrorOrigin *err,
 	if (panicked || was_busy)
 		*err = TEE_ORIGIN_TEE;
 	else
-		*err = TEE_ORIGIN_TRUSTED_APP;
+		*err = s->err_origin;
 
-	if (res != TEE_SUCCESS)
-		EMSG("Failed. Return error 0x%x", res);
+	tee_ta_put_session(s);
+	if (panicked || res != TEE_SUCCESS)
+		tee_ta_close_session(s, open_sessions, KERN_IDENTITY);
+
+	if (!res)
+		*sess = s;
+	else
+		EMSG("Failed for TA %pUl. Return error %#"PRIx32, uuid, res);
 
 	return res;
 }
@@ -532,39 +746,240 @@ TEE_Result tee_ta_invoke_command(TEE_ErrorOrigin *err,
 				 uint32_t cancel_req_to, uint32_t cmd,
 				 struct tee_ta_param *param)
 {
-	TEE_Result res;
+	struct tee_ta_ctx *ta_ctx = NULL;
+	struct ts_ctx *ts_ctx = NULL;
+	TEE_Result res = TEE_SUCCESS;
+	bool panicked = false;
 
 	if (check_client(sess, clnt_id) != TEE_SUCCESS)
 		return TEE_ERROR_BAD_PARAMETERS; /* intentional generic error */
 
-	if (sess->ctx->panicked) {
-		DMSG("   Panicked !");
-		*err = TEE_ORIGIN_TEE;
-		return TEE_ERROR_TARGET_DEAD;
+	if (!check_params(sess, param))
+		return TEE_ERROR_BAD_PARAMETERS;
+
+	ts_ctx = sess->ts_sess.ctx;
+	ta_ctx = ts_to_ta_ctx(ts_ctx);
+
+	tee_ta_set_busy(ta_ctx);
+
+	if (!ta_ctx->panicked) {
+		sess->param = param;
+		set_invoke_timeout(sess, cancel_req_to);
+		res = ts_ctx->ops->enter_invoke_cmd(&sess->ts_sess, cmd);
+		sess->param = NULL;
 	}
 
-	tee_ta_set_busy(sess->ctx);
-
-	res = tee_ta_verify_param(sess, param);
-	if (res != TEE_SUCCESS) {
-		*err = TEE_ORIGIN_TEE;
-		goto function_exit;
-	}
-
-	set_invoke_timeout(sess, cancel_req_to);
-	res = sess->ctx->ops->enter_invoke_cmd(sess, cmd, param, err);
-
-	if (sess->ctx->panicked) {
-		*err = TEE_ORIGIN_TEE;
+	panicked = ta_ctx->panicked;
+	if (panicked) {
+		release_ta_ctx(ta_ctx);
 		res = TEE_ERROR_TARGET_DEAD;
 	}
 
-function_exit:
-	tee_ta_clear_busy(sess->ctx);
-	if (res != TEE_SUCCESS)
-		DMSG("  => Error: %x of %d\n", res, *err);
+	tee_ta_clear_busy(ta_ctx);
+
+	/*
+	 * Origin error equal to TEE_ORIGIN_TRUSTED_APP for "regular" error,
+	 * apart from panicking.
+	 */
+	if (panicked)
+		*err = TEE_ORIGIN_TEE;
+	else
+		*err = sess->err_origin;
+
+	/* Short buffer is not an effective error case */
+	if (res != TEE_SUCCESS && res != TEE_ERROR_SHORT_BUFFER)
+		DMSG("Error: %x of %d", res, *err);
+
 	return res;
 }
+
+#if defined(CFG_TA_STATS)
+static TEE_Result dump_ta_memstats(struct tee_ta_session *s,
+				   struct tee_ta_param *param)
+{
+	TEE_Result res = TEE_SUCCESS;
+	struct tee_ta_ctx *ctx = NULL;
+	struct ts_ctx *ts_ctx = NULL;
+	bool panicked = false;
+
+	ts_ctx = s->ts_sess.ctx;
+	if (!ts_ctx)
+		return TEE_ERROR_ITEM_NOT_FOUND;
+
+	if (is_user_ta_ctx(ts_ctx) &&
+	    to_user_ta_ctx(ts_ctx)->uctx.is_initializing)
+		return TEE_ERROR_BAD_STATE;
+
+	ctx = ts_to_ta_ctx(ts_ctx);
+
+	if (tee_ta_try_set_busy(ctx)) {
+		if (!ctx->panicked) {
+			s->param = param;
+			set_invoke_timeout(s, TEE_TIMEOUT_INFINITE);
+			res = ts_ctx->ops->dump_mem_stats(&s->ts_sess);
+			s->param = NULL;
+		}
+
+		panicked = ctx->panicked;
+		if (panicked) {
+			release_ta_ctx(ctx);
+			res = TEE_ERROR_TARGET_DEAD;
+		}
+
+		tee_ta_clear_busy(ctx);
+	} else {
+		/* Deadlock avoided */
+		res = TEE_ERROR_BUSY;
+	}
+
+	return res;
+}
+
+static void init_dump_ctx(struct tee_ta_dump_ctx *dump_ctx)
+{
+	struct tee_ta_session *sess = NULL;
+	struct tee_ta_session_head *open_sessions = NULL;
+	struct tee_ta_ctx *ctx = NULL;
+	unsigned int n = 0;
+
+	nsec_sessions_list_head(&open_sessions);
+	/*
+	 * Scan all sessions opened from secure side by searching through
+	 * all available TA instances and for each context, scan all opened
+	 * sessions.
+	 */
+	TAILQ_FOREACH(ctx, &tee_ctxes, link) {
+		unsigned int cnt = 0;
+
+		if (!is_user_ta_ctx(&ctx->ts_ctx))
+			continue;
+
+		memcpy(&dump_ctx[n].uuid, &ctx->ts_ctx.uuid,
+		       sizeof(ctx->ts_ctx.uuid));
+		dump_ctx[n].panicked = ctx->panicked;
+		dump_ctx[n].is_user_ta = is_user_ta_ctx(&ctx->ts_ctx);
+		TAILQ_FOREACH(sess, open_sessions, link) {
+			if (sess->ts_sess.ctx == &ctx->ts_ctx) {
+				if (cnt == MAX_DUMP_SESS_NUM)
+					break;
+
+				dump_ctx[n].sess_id[cnt] = sess->id;
+				cnt++;
+			}
+		}
+
+		dump_ctx[n].sess_num = cnt;
+		n++;
+	}
+}
+
+static TEE_Result dump_ta_stats(struct tee_ta_dump_ctx *dump_ctx,
+				struct pta_stats_ta *dump_stats,
+				size_t ta_count)
+{
+	TEE_Result res = TEE_SUCCESS;
+	struct tee_ta_session *sess = NULL;
+	struct tee_ta_session_head *open_sessions = NULL;
+	struct tee_ta_param param = { };
+	unsigned int i = 0;
+	unsigned int j = 0;
+
+	nsec_sessions_list_head(&open_sessions);
+
+	for (i = 0; i < ta_count; i++) {
+		struct pta_stats_ta *stats = &dump_stats[i];
+
+		memcpy(&stats->uuid, &dump_ctx[i].uuid,
+		       sizeof(dump_ctx[i].uuid));
+		stats->panicked = dump_ctx[i].panicked;
+		stats->sess_num = dump_ctx[i].sess_num;
+
+		/* Find a session from dump context */
+		for (j = 0, sess = NULL; j < dump_ctx[i].sess_num && !sess; j++)
+			sess = tee_ta_get_session(dump_ctx[i].sess_id[j], true,
+						  open_sessions);
+
+		if (!sess)
+			continue;
+		/* If session is existing, get its heap stats */
+		memset(&param, 0, sizeof(struct tee_ta_param));
+		param.types = TEE_PARAM_TYPES(TEE_PARAM_TYPE_VALUE_OUTPUT,
+					      TEE_PARAM_TYPE_VALUE_OUTPUT,
+					      TEE_PARAM_TYPE_VALUE_OUTPUT,
+					      TEE_PARAM_TYPE_NONE);
+		res = dump_ta_memstats(sess, &param);
+		if (res == TEE_SUCCESS) {
+			stats->heap.allocated = param.u[0].val.a;
+			stats->heap.max_allocated = param.u[0].val.b;
+			stats->heap.size = param.u[1].val.a;
+			stats->heap.num_alloc_fail = param.u[1].val.b;
+			stats->heap.biggest_alloc_fail = param.u[2].val.a;
+			stats->heap.biggest_alloc_fail_used = param.u[2].val.b;
+		} else {
+			memset(&stats->heap, 0, sizeof(stats->heap));
+		}
+		tee_ta_put_session(sess);
+	}
+
+	return TEE_SUCCESS;
+}
+
+TEE_Result tee_ta_instance_stats(void *buf, size_t *buf_size)
+{
+	TEE_Result res = TEE_SUCCESS;
+	struct pta_stats_ta *dump_stats = NULL;
+	struct tee_ta_dump_ctx *dump_ctx = NULL;
+	struct tee_ta_ctx *ctx = NULL;
+	size_t sz = 0;
+	size_t ta_count = 0;
+
+	if (!buf_size)
+		return TEE_ERROR_BAD_PARAMETERS;
+
+	mutex_lock(&tee_ta_mutex);
+
+	/* Go through all available TA and calc out the actual buffer size. */
+	TAILQ_FOREACH(ctx, &tee_ctxes, link)
+		if (is_user_ta_ctx(&ctx->ts_ctx))
+			ta_count++;
+
+	sz = sizeof(struct pta_stats_ta) * ta_count;
+	if (!sz) {
+		/* sz = 0 means there is no UTA, return no item found. */
+		res = TEE_ERROR_ITEM_NOT_FOUND;
+	} else if (!buf || *buf_size < sz) {
+		/*
+		 * buf is null or pass size less than actual size
+		 * means caller try to query the buffer size.
+		 * update *buf_size.
+		 */
+		*buf_size = sz;
+		res = TEE_ERROR_SHORT_BUFFER;
+	} else if (!IS_ALIGNED_WITH_TYPE(buf, uint32_t)) {
+		DMSG("Data alignment");
+		res = TEE_ERROR_BAD_PARAMETERS;
+	} else {
+		dump_stats = (struct pta_stats_ta *)buf;
+		dump_ctx = malloc(sizeof(struct tee_ta_dump_ctx) * ta_count);
+		if (!dump_ctx)
+			res = TEE_ERROR_OUT_OF_MEMORY;
+		else
+			init_dump_ctx(dump_ctx);
+	}
+	mutex_unlock(&tee_ta_mutex);
+
+	if (res != TEE_SUCCESS)
+		return res;
+
+	/* Dump user ta stats by iterating dump_ctx[] */
+	res = dump_ta_stats(dump_ctx, dump_stats, ta_count);
+	if (res == TEE_SUCCESS)
+		*buf_size = sz;
+
+	free(dump_ctx);
+	return res;
+}
+#endif
 
 TEE_Result tee_ta_cancel_command(TEE_ErrorOrigin *err,
 				 struct tee_ta_session *sess,
@@ -606,110 +1021,116 @@ bool tee_ta_session_is_cancelled(struct tee_ta_session *s, TEE_Time *curr_time)
 	return false;
 }
 
-static void update_current_ctx(struct thread_specific_data *tsd)
+#if defined(CFG_TA_GPROF_SUPPORT)
+void tee_ta_gprof_sample_pc(vaddr_t pc)
 {
-	struct tee_ta_ctx *ctx = NULL;
-	struct tee_ta_session *s = TAILQ_FIRST(&tsd->sess_stack);
+	struct ts_session *s = ts_get_current_session();
+	struct user_ta_ctx *utc = NULL;
+	struct sample_buf *sbuf = NULL;
+	TEE_Result res = 0;
+	size_t idx = 0;
 
-	if (s) {
-		if (is_static_ta_ctx(s->ctx))
-			s = TAILQ_NEXT(s, link_tsd);
+	sbuf = s->sbuf;
+	if (!sbuf || !sbuf->enabled)
+		return; /* PC sampling is not enabled */
 
-		if (s)
-			ctx = s->ctx;
+	idx = (((uint64_t)pc - sbuf->offset)/2 * sbuf->scale)/65536;
+	if (idx < sbuf->nsamples) {
+		utc = to_user_ta_ctx(s->ctx);
+		res = vm_check_access_rights(&utc->uctx,
+					     TEE_MEMORY_ACCESS_READ |
+					     TEE_MEMORY_ACCESS_WRITE |
+					     TEE_MEMORY_ACCESS_ANY_OWNER,
+					     (uaddr_t)&sbuf->samples[idx],
+					     sizeof(*sbuf->samples));
+		if (res != TEE_SUCCESS)
+			return;
+		sbuf->samples[idx]++;
 	}
-
-	if (tsd->ctx != ctx)
-		tee_mmu_set_ctx(ctx);
-	/*
-	 * If ctx->mmu == NULL we must not have user mapping active,
-	 * if ctx->mmu != NULL we must have user mapping active.
-	 */
-	if (((ctx && is_user_ta_ctx(ctx) ?
-			to_user_ta_ctx(ctx)->mmu : NULL) == NULL) ==
-					core_mmu_user_mapping_is_active())
-		panic("unexpected active mapping");
+	sbuf->count++;
 }
 
-void tee_ta_push_current_session(struct tee_ta_session *sess)
+static void gprof_update_session_utime(bool suspend, struct ts_session *s,
+				       uint64_t now)
 {
-	struct thread_specific_data *tsd = thread_get_tsd();
+	struct sample_buf *sbuf = s->sbuf;
 
-	TAILQ_INSERT_HEAD(&tsd->sess_stack, sess, link_tsd);
-	update_current_ctx(tsd);
-}
+	if (!sbuf)
+		return;
 
-struct tee_ta_session *tee_ta_pop_current_session(void)
-{
-	struct thread_specific_data *tsd = thread_get_tsd();
-	struct tee_ta_session *s = TAILQ_FIRST(&tsd->sess_stack);
-
-	if (s) {
-		TAILQ_REMOVE(&tsd->sess_stack, s, link_tsd);
-		update_current_ctx(tsd);
+	if (suspend) {
+		assert(sbuf->usr_entered);
+		sbuf->usr += now - sbuf->usr_entered;
+		sbuf->usr_entered = 0;
+	} else {
+		assert(!sbuf->usr_entered);
+		if (!now)
+			now++; /* 0 is reserved */
+		sbuf->usr_entered = now;
 	}
-	return s;
-}
-
-TEE_Result tee_ta_get_current_session(struct tee_ta_session **sess)
-{
-	struct tee_ta_session *s = TAILQ_FIRST(&thread_get_tsd()->sess_stack);
-
-	if (!s)
-		return TEE_ERROR_BAD_STATE;
-	*sess = s;
-	return TEE_SUCCESS;
-}
-
-struct tee_ta_session *tee_ta_get_calling_session(void)
-{
-	struct tee_ta_session *s = TAILQ_FIRST(&thread_get_tsd()->sess_stack);
-
-	if (s)
-		s = TAILQ_NEXT(s, link_tsd);
-	return s;
-}
-
-TEE_Result tee_ta_get_client_id(TEE_Identity *id)
-{
-	TEE_Result res;
-	struct tee_ta_session *sess;
-
-	res = tee_ta_get_current_session(&sess);
-	if (res != TEE_SUCCESS)
-		return res;
-
-	if (id == NULL)
-		return TEE_ERROR_BAD_PARAMETERS;
-
-	*id = sess->clnt_id;
-	return TEE_SUCCESS;
 }
 
 /*
- * dump_state - Display TA state as an error log.
+ * Update user-mode CPU time for the current session
+ * @suspend: true if session is being suspended (leaving user mode), false if
+ * it is resumed (entering user mode)
  */
-static void dump_state(struct tee_ta_ctx *ctx)
+static void tee_ta_update_session_utime(bool suspend)
 {
-	struct tee_ta_session *s = NULL;
-	bool active __maybe_unused;
+	struct ts_session *s = ts_get_current_session();
+	uint64_t now = barrier_read_counter_timer();
 
-	active = ((tee_ta_get_current_session(&s) == TEE_SUCCESS) &&
-		  s && s->ctx == ctx);
-
-	EMSG_RAW("Status of TA %pUl (%p) %s", (void *)&ctx->uuid, (void *)ctx,
-		active ? "(active)" : "");
-	ctx->ops->dump_state(ctx);
+	gprof_update_session_utime(suspend, s, now);
 }
 
-void tee_ta_dump_current(void)
+void tee_ta_update_session_utime_suspend(void)
 {
-	struct tee_ta_session *s = NULL;
+	tee_ta_update_session_utime(true);
+}
 
-	if (tee_ta_get_current_session(&s) != TEE_SUCCESS) {
-		EMSG("no valid session found, cannot log TA status");
+void tee_ta_update_session_utime_resume(void)
+{
+	tee_ta_update_session_utime(false);
+}
+#endif
+
+#if defined(CFG_FTRACE_SUPPORT)
+static void ftrace_update_times(bool suspend)
+{
+	struct ts_session *s = ts_get_current_session_may_fail();
+	struct ftrace_buf *fbuf = NULL;
+	uint64_t now = 0;
+	uint32_t i = 0;
+
+	if (!s)
 		return;
-	}
 
-	dump_state(s->ctx);
+	now = barrier_read_counter_timer();
+
+	fbuf = s->fbuf;
+	if (!fbuf)
+		return;
+
+	if (suspend) {
+		fbuf->suspend_time = now;
+	} else {
+		for (i = 0; i <= fbuf->ret_idx; i++)
+			fbuf->begin_time[i] += now - fbuf->suspend_time;
+	}
+}
+
+void tee_ta_ftrace_update_times_suspend(void)
+{
+	ftrace_update_times(true);
+}
+
+void tee_ta_ftrace_update_times_resume(void)
+{
+	ftrace_update_times(false);
+}
+#endif
+
+bool __noprof is_ta_ctx(struct ts_ctx *ctx)
+{
+	return is_user_ta_ctx(ctx) || is_pseudo_ta_ctx(ctx);
 }

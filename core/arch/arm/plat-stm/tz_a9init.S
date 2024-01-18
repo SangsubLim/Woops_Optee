@@ -1,28 +1,6 @@
+/* SPDX-License-Identifier: BSD-2-Clause */
 /*
  * Copyright (c) 2014-2016, STMicroelectronics International N.V.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice,
- * this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- * this list of conditions and the following disclaimer in the documentation
- * and/or other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
  */
 
 #include <arm32.h>
@@ -30,7 +8,6 @@
 #include <arm32_macros_cortex_a9.S>
 #include <asm.S>
 #include <kernel/tz_ssvce_def.h>
-#include <kernel/unwind.h>
 #include <platform_config.h>
 
 .section .text
@@ -49,8 +26,6 @@
  * TODO: to be moved to PL310 code (tz_svce_pl310.S ?)
  */
 FUNC arm_cl2_enable , :
-UNWIND(	.fnstart)
-
 	/* Enable PL310 ctrl -> only set lsb bit */
 	mov  r1, #0x1
 	str  r1, [r0, #PL310_CTRL]
@@ -63,8 +38,6 @@ UNWIND(	.fnstart)
 	write_actlr r0
 
 	mov pc, lr
-
-UNWIND(	.fnend)
 END_FUNC arm_cl2_enable
 
 /*
@@ -76,26 +49,22 @@ END_FUNC arm_cl2_enable
  * Trap CPU in case of error.
  */
 FUNC plat_cpu_reset_early , :
-UNWIND(	.fnstart)
+	/* CPSR.A can be modified in any security state. */
+	mov_imm	r0, SCR_AW
+	write_scr r0
 
-	movw r0, #(CPU_SCTLR_INIT & 0xFFFF)
-	movt r0, #((CPU_SCTLR_INIT >> 16) & 0xFFFF)
+	mov_imm r0, CPU_SCTLR_INIT
 	write_sctlr r0
 
-	movw r0, #(CPU_ACTLR_INIT & 0xFFFF)
-	movt r0, #((CPU_ACTLR_INIT >> 16) & 0xFFFF)
+	mov_imm r0, CPU_ACTLR_INIT
 	write_actlr r0
 
-	movw r0, #(CPU_NSACR_INIT & 0xFFFF)
-	movt r0, #((CPU_NSACR_INIT >> 16) & 0xFFFF)
+	mov_imm r0, CPU_NSACR_INIT
 	write_nsacr r0
 
-	movw r0, #(CPU_PCR_INIT & 0xFFFF)
-	movt r0, #((CPU_PCR_INIT >> 16) & 0xFFFF)
+	mov_imm r0, CPU_PCR_INIT
 	write_pcr r0
 
 	mov pc, lr
-
-UNWIND(	.fnend)
 END_FUNC plat_cpu_reset_early
 

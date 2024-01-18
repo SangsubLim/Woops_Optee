@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: BSD-3-Clause */
 /*
  * Copyright (c) 2016, Linaro Ltd and Contributors. All rights reserved.
  * Copyright (c) 2016, Hisilicon Ltd and Contributors. All rights reserved.
@@ -83,8 +84,7 @@
 #define GPIO6_2		50
 #define SPI_CLK_HZ	150000000 /* 150mhz */
 #define SPI_500_KHZ	500000
-
-vaddr_t nsec_periph_base(paddr_t pa);
+#define SPI_10_KHZ	10000
 
 #ifdef CFG_SPI
 void spi_init(void);

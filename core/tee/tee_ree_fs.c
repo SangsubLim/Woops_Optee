@@ -1,647 +1,335 @@
+// SPDX-License-Identifier: BSD-2-Clause
 /*
  * Copyright (c) 2015, Linaro Limited
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice,
- * this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- * this list of conditions and the following disclaimer in the documentation
- * and/or other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
  */
 
 #include <assert.h>
-#include <kernel/thread.h>
+#include <config.h>
 #include <kernel/mutex.h>
+#include <kernel/nv_counter.h>
 #include <kernel/panic.h>
+#include <kernel/thread.h>
+#include <kernel/user_access.h>
+#include <mempool.h>
 #include <mm/core_memprot.h>
-#include <optee_msg.h>
+#include <mm/tee_pager.h>
+#include <optee_rpc_cmd.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <string_ext.h>
+#include <string.h>
 #include <sys/queue.h>
-#include <tee/tee_cryp_provider.h>
+#include <tee/fs_dirfile.h>
+#include <tee/fs_htree.h>
 #include <tee/tee_fs.h>
-#include <tee/tee_fs_defs.h>
 #include <tee/tee_fs_rpc.h>
-#include <tee/tee_fs_key_manager.h>
+#include <tee/tee_pobj.h>
 #include <trace.h>
 #include <utee_defines.h>
 #include <util.h>
-
-/*
- * This file implements the tee_file_operations structure for a secure
- * filesystem based on single file in normal world.
- *
- * All fields in the REE file are duplicated with two versions 0 and 1. The
- * active meta-data block is selected by the lowest bit in the
- * meta-counter.  The active file block is selected by corresponding bit
- * number in struct tee_fs_file_info.backup_version_table.
- *
- * The atomicity of each operation is ensured by updating meta-counter when
- * everything in the secondary blocks (both meta-data and file-data blocks)
- * are successfully written.  The main purpose of the code below is to
- * perform block encryption and authentication of the file data, and
- * properly handle seeking through the file. One file (in the sense of
- * struct tee_file_operations) maps to one file in the REE filesystem, and
- * has the following structure:
- *
- * [ 4 bytes meta-counter]
- * [ meta-data version 0][ meta-data version 1 ]
- * [ Block 0 version 0 ][ Block 0 version 1 ]
- * [ Block 1 version 0 ][ Block 1 version 1 ]
- * ...
- * [ Block n version 0 ][ Block n version 1 ]
- *
- * One meta-data block is built up as:
- * [ struct meta_header | struct tee_fs_get_header_size ]
- *
- * One data block is built up as:
- * [ struct block_header | BLOCK_FILE_SIZE bytes ]
- *
- * struct meta_header and struct block_header are defined in
- * tee_fs_key_manager.h.
- *
- */
 
 #define BLOCK_SHIFT	12
 
 #define BLOCK_SIZE	(1 << BLOCK_SHIFT)
 
-#define MAX_FILE_SIZE	(BLOCK_SIZE * NUM_BLOCKS_PER_FILE)
-
 struct tee_fs_fd {
-	uint32_t meta_counter;
-	struct tee_fs_file_meta meta;
-	tee_fs_off_t pos;
-	uint32_t flags;
-	bool is_new_file;
+	struct tee_fs_htree *ht;
 	int fd;
+	struct tee_fs_dirfile_fileh dfh;
+	const TEE_UUID *uuid;
 };
 
-static inline int pos_to_block_num(int position)
+struct tee_fs_dir {
+	struct tee_fs_dirfile_dirh *dirh;
+	int idx;
+	struct tee_fs_dirent d;
+	const TEE_UUID *uuid;
+};
+
+static int pos_to_block_num(int position)
 {
 	return position >> BLOCK_SHIFT;
 }
 
-static inline int get_last_block_num(size_t size)
-{
-	return pos_to_block_num(size - 1);
-}
-
-static bool get_backup_version_of_block(struct tee_fs_file_meta *meta,
-					size_t block_num)
-{
-	uint32_t index = (block_num / 32);
-	uint32_t block_mask = 1 << (block_num % 32);
-
-	return !!(meta->info.backup_version_table[index] & block_mask);
-}
-
-static inline void toggle_backup_version_of_block(
-		struct tee_fs_file_meta *meta,
-		size_t block_num)
-{
-	uint32_t index = (block_num / 32);
-	uint32_t block_mask = 1 << (block_num % 32);
-
-	meta->info.backup_version_table[index] ^= block_mask;
-}
-
-struct block_operations {
-
-	/*
-	 * Read a block from REE File System which is corresponding
-	 * to the given block_num.
-	 */
-	struct block *(*read)(struct tee_fs_fd *fdp, int block_num);
-
-	/*
-	 * Write the given block to REE File System
-	 */
-	int (*write)(struct tee_fs_fd *fdp, struct block *b,
-			struct tee_fs_file_meta *new_meta);
-};
-
 static struct mutex ree_fs_mutex = MUTEX_INITIALIZER;
 
-static TEE_Result ree_fs_opendir_rpc(const char *name, struct tee_fs_dir **d)
-
+static void *get_tmp_block(void)
 {
-	return tee_fs_rpc_opendir(OPTEE_MSG_RPC_CMD_FS, name, d);
+	return mempool_alloc(mempool_default, BLOCK_SIZE);
 }
 
-static void ree_fs_closedir_rpc(struct tee_fs_dir *d)
+static void put_tmp_block(void *tmp_block)
 {
-	if (d)
-		tee_fs_rpc_closedir(OPTEE_MSG_RPC_CMD_FS, d);
+	mempool_free(mempool_default, tmp_block);
 }
 
-static TEE_Result ree_fs_readdir_rpc(struct tee_fs_dir *d,
-				     struct tee_fs_dirent **ent)
-{
-	return tee_fs_rpc_readdir(OPTEE_MSG_RPC_CMD_FS, d, ent);
-}
-
-static size_t meta_size(void)
-{
-	return tee_fs_get_header_size(META_FILE) +
-	       sizeof(struct tee_fs_file_meta);
-}
-
-static size_t meta_pos_raw(struct tee_fs_fd *fdp, bool active)
-{
-	size_t offs = sizeof(uint32_t);
-
-	if ((fdp->meta_counter & 1) == active)
-		offs += meta_size();
-	return offs;
-}
-
-static size_t block_size_raw(void)
-{
-	return tee_fs_get_header_size(BLOCK_FILE) + BLOCK_SIZE;
-}
-
-static size_t block_pos_raw(struct tee_fs_file_meta *meta, size_t block_num,
-			    bool active)
-{
-	size_t n = block_num * 2;
-
-	if (active == get_backup_version_of_block(meta, block_num))
-		n++;
-
-	return sizeof(uint32_t) + meta_size() * 2 + n * block_size_raw();
-}
-
-/*
- * encrypted_fek: as input for META_FILE and BLOCK_FILE
- */
-static TEE_Result encrypt_and_write_file(struct tee_fs_fd *fdp,
-		enum tee_fs_file_type file_type, size_t offs,
-		void *data_in, size_t data_in_size,
-		uint8_t *encrypted_fek)
+static TEE_Result out_of_place_write(struct tee_fs_fd *fdp, size_t pos,
+				     const void *buf_core,
+				     const void *buf_user, size_t len)
 {
 	TEE_Result res;
-	struct tee_fs_rpc_operation op;
-	void *ciphertext;
-	size_t header_size = tee_fs_get_header_size(file_type);
-	size_t ciphertext_size = header_size + data_in_size;
-
-
-	res = tee_fs_rpc_write_init(&op, OPTEE_MSG_RPC_CMD_FS, fdp->fd,
-				    offs, ciphertext_size, &ciphertext);
-	if (res != TEE_SUCCESS)
-		return res;
-
-	res = tee_fs_encrypt_file(file_type, data_in, data_in_size,
-				  ciphertext, &ciphertext_size, encrypted_fek);
-	if (res != TEE_SUCCESS)
-		return res;
-
-	return tee_fs_rpc_write_final(&op);
-}
-
-/*
- * encrypted_fek: as output for META_FILE
- *                as input for BLOCK_FILE
- */
-static TEE_Result read_and_decrypt_file(struct tee_fs_fd *fdp,
-		enum tee_fs_file_type file_type, size_t offs,
-		void *data_out, size_t *data_out_size,
-		uint8_t *encrypted_fek)
-{
-	TEE_Result res;
-	struct tee_fs_rpc_operation op;
-	size_t bytes;
-	void *ciphertext;
-
-	bytes = *data_out_size + tee_fs_get_header_size(file_type);
-	res = tee_fs_rpc_read_init(&op, OPTEE_MSG_RPC_CMD_FS, fdp->fd, offs,
-				   bytes, &ciphertext);
-	if (res != TEE_SUCCESS)
-		return res;
-
-	res = tee_fs_rpc_read_final(&op, &bytes);
-	if (res != TEE_SUCCESS)
-		return res;
-
-	if (!bytes) {
-		*data_out_size = 0;
-		return TEE_SUCCESS;
-	}
-
-	res = tee_fs_decrypt_file(file_type, ciphertext, bytes, data_out,
-				  data_out_size, encrypted_fek);
-	if (res != TEE_SUCCESS)
-		return TEE_ERROR_CORRUPT_OBJECT;
-	return TEE_SUCCESS;
-}
-
-static TEE_Result write_meta_file(struct tee_fs_fd *fdp,
-		struct tee_fs_file_meta *meta)
-{
-	size_t offs = meta_pos_raw(fdp, false);
-
-	return encrypt_and_write_file(fdp, META_FILE, offs,
-			(void *)&meta->info, sizeof(meta->info),
-			meta->encrypted_fek);
-}
-
-static TEE_Result write_meta_counter(struct tee_fs_fd *fdp)
-{
-	TEE_Result res;
-	struct tee_fs_rpc_operation op;
-	size_t bytes = sizeof(uint32_t);
-	void *data;
-
-	res = tee_fs_rpc_write_init(&op, OPTEE_MSG_RPC_CMD_FS, fdp->fd, 0,
-				    bytes, &data);
-	if (res != TEE_SUCCESS)
-		return res;
-
-	memcpy(data, &fdp->meta_counter, bytes);
-
-	return tee_fs_rpc_write_final(&op);
-}
-
-static TEE_Result create_meta(struct tee_fs_fd *fdp, const char *fname)
-{
-	TEE_Result res;
-
-	memset(fdp->meta.info.backup_version_table, 0xff,
-		sizeof(fdp->meta.info.backup_version_table));
-	fdp->meta.info.length = 0;
-
-	res = tee_fs_generate_fek(fdp->meta.encrypted_fek, TEE_FS_KM_FEK_SIZE);
-	if (res != TEE_SUCCESS)
-		return res;
-
-	res = tee_fs_rpc_create(OPTEE_MSG_RPC_CMD_FS, fname, &fdp->fd);
-	if (res != TEE_SUCCESS)
-		return res;
-
-	fdp->meta.counter = fdp->meta_counter;
-
-	res = write_meta_file(fdp, &fdp->meta);
-	if (res != TEE_SUCCESS)
-		return res;
-	return write_meta_counter(fdp);
-}
-
-static TEE_Result commit_meta_file(struct tee_fs_fd *fdp,
-				   struct tee_fs_file_meta *new_meta)
-{
-	TEE_Result res;
-
-	new_meta->counter = fdp->meta_counter + 1;
-
-	res = write_meta_file(fdp, new_meta);
-	if (res != TEE_SUCCESS)
-		return res;
+	size_t start_block_num = pos_to_block_num(pos);
+	size_t end_block_num = pos_to_block_num(pos + len - 1);
+	size_t remain_bytes = len;
+	uint8_t *data_core_ptr = (uint8_t *)buf_core;
+	uint8_t *data_user_ptr = (uint8_t *)buf_user;
+	uint8_t *block;
+	struct tee_fs_htree_meta *meta = tee_fs_htree_get_meta(fdp->ht);
 
 	/*
-	 * From now on the new meta is successfully committed,
-	 * change tee_fs_fd accordingly
+	 * It doesn't make sense to call this function if nothing is to be
+	 * written. This also guards against end_block_num getting an
+	 * unexpected value when pos == 0 and len == 0.
 	 */
-	fdp->meta = *new_meta;
-	fdp->meta_counter = fdp->meta.counter;
+	if (!len)
+		return TEE_ERROR_BAD_PARAMETERS;
 
-	return write_meta_counter(fdp);
-}
-
-static TEE_Result read_meta_file(struct tee_fs_fd *fdp,
-		struct tee_fs_file_meta *meta)
-{
-	size_t meta_info_size = sizeof(struct tee_fs_file_info);
-	size_t offs = meta_pos_raw(fdp, true);
-
-	return read_and_decrypt_file(fdp, META_FILE, offs,
-				     &meta->info, &meta_info_size,
-				     meta->encrypted_fek);
-}
-
-static TEE_Result read_meta_counter(struct tee_fs_fd *fdp)
-{
-	TEE_Result res;
-	struct tee_fs_rpc_operation op;
-	void *data;
-	size_t bytes = sizeof(uint32_t);
-
-	res = tee_fs_rpc_read_init(&op, OPTEE_MSG_RPC_CMD_FS, fdp->fd, 0,
-				   bytes, &data);
-	if (res != TEE_SUCCESS)
-		return res;
-
-	res = tee_fs_rpc_read_final(&op, &bytes);
-	if (res != TEE_SUCCESS)
-		return res;
-
-	if (bytes != sizeof(uint32_t))
-		return TEE_ERROR_CORRUPT_OBJECT;
-
-	memcpy(&fdp->meta_counter, data, bytes);
-
-	return TEE_SUCCESS;
-}
-
-static TEE_Result read_meta(struct tee_fs_fd *fdp, const char *fname)
-{
-	TEE_Result res;
-
-	res = tee_fs_rpc_open(OPTEE_MSG_RPC_CMD_FS, fname, &fdp->fd);
-	if (res != TEE_SUCCESS)
-		return res;
-
-	res = read_meta_counter(fdp);
-	if (res != TEE_SUCCESS)
-		return res;
-
-	return read_meta_file(fdp, &fdp->meta);
-}
-
-static TEE_Result read_block(struct tee_fs_fd *fdp, int bnum, uint8_t *data)
-{
-	TEE_Result res;
-	size_t ct_size = block_size_raw();
-	size_t out_size = BLOCK_SIZE;
-	ssize_t pos = block_pos_raw(&fdp->meta, bnum, true);
-	size_t bytes;
-	void *ct;
-	struct tee_fs_rpc_operation op;
-
-	res = tee_fs_rpc_read_init(&op, OPTEE_MSG_RPC_CMD_FS, fdp->fd, pos,
-				   ct_size, &ct);
-	if (res != TEE_SUCCESS)
-		return res;
-	res = tee_fs_rpc_read_final(&op, &bytes);
-	if (res != TEE_SUCCESS)
-		return res;
-	if (!bytes) {
-		memset(data, 0, BLOCK_SIZE);
-		return TEE_SUCCESS; /* Block does not exist */
-	}
-
-	return tee_fs_decrypt_file(BLOCK_FILE, ct, bytes, data,
-				   &out_size, fdp->meta.encrypted_fek);
-}
-
-static TEE_Result write_block(struct tee_fs_fd *fdp, size_t bnum, uint8_t *data,
-			      struct tee_fs_file_meta *new_meta)
-{
-	TEE_Result res;
-	size_t offs = block_pos_raw(new_meta, bnum, false);
-
-	res = encrypt_and_write_file(fdp, BLOCK_FILE, offs, data,
-				     BLOCK_SIZE, new_meta->encrypted_fek);
-	if (res == TEE_SUCCESS)
-		toggle_backup_version_of_block(new_meta, bnum);
-	return res;
-}
-
-static TEE_Result out_of_place_write(struct tee_fs_fd *fdp, const void *buf,
-		size_t len, struct tee_fs_file_meta *new_meta)
-{
-	TEE_Result res;
-	int start_block_num = pos_to_block_num(fdp->pos);
-	int end_block_num = pos_to_block_num(fdp->pos + len - 1);
-	size_t remain_bytes = len;
-	uint8_t *data_ptr = (uint8_t *)buf;
-	uint8_t *block;
-	int orig_pos = fdp->pos;
-
-	block = malloc(BLOCK_SIZE);
+	block = get_tmp_block();
 	if (!block)
 		return TEE_ERROR_OUT_OF_MEMORY;
 
 	while (start_block_num <= end_block_num) {
-		int offset = fdp->pos % BLOCK_SIZE;
+		size_t offset = pos % BLOCK_SIZE;
 		size_t size_to_write = MIN(remain_bytes, (size_t)BLOCK_SIZE);
 
 		if (size_to_write + offset > BLOCK_SIZE)
 			size_to_write = BLOCK_SIZE - offset;
 
-		res = read_block(fdp, start_block_num, block);
-		if (res == TEE_ERROR_ITEM_NOT_FOUND)
+		if (start_block_num * BLOCK_SIZE <
+		    ROUNDUP(meta->length, BLOCK_SIZE)) {
+			res = tee_fs_htree_read_block(&fdp->ht,
+						      start_block_num, block);
+			if (res != TEE_SUCCESS)
+				goto exit;
+		} else {
 			memset(block, 0, BLOCK_SIZE);
-		else if (res != TEE_SUCCESS)
-			goto exit;
+		}
 
-		if (data_ptr)
-			memcpy(block + offset, data_ptr, size_to_write);
-		else
+		if (data_core_ptr) {
+			memcpy(block + offset, data_core_ptr, size_to_write);
+		} else if (data_user_ptr) {
+			res = copy_from_user(block + offset, data_user_ptr,
+					     size_to_write);
+			if (res)
+				return res;
+		} else {
 			memset(block + offset, 0, size_to_write);
+		}
 
-		res = write_block(fdp, start_block_num, block, new_meta);
+		res = tee_fs_htree_write_block(&fdp->ht, start_block_num,
+					       block);
 		if (res != TEE_SUCCESS)
 			goto exit;
 
-		if (data_ptr)
-			data_ptr += size_to_write;
+		if (data_core_ptr)
+			data_core_ptr += size_to_write;
+		if (data_user_ptr)
+			data_user_ptr += size_to_write;
 		remain_bytes -= size_to_write;
 		start_block_num++;
-		fdp->pos += size_to_write;
+		pos += size_to_write;
 	}
 
-	if (fdp->pos > (tee_fs_off_t)new_meta->info.length)
-		new_meta->info.length = fdp->pos;
+	if (pos > meta->length) {
+		meta->length = pos;
+		tee_fs_htree_meta_set_dirty(fdp->ht);
+	}
 
 exit:
-	free(block);
-	if (res != TEE_SUCCESS)
-		fdp->pos = orig_pos;
+	if (block)
+		put_tmp_block(block);
 	return res;
 }
 
-static TEE_Result open_internal(const char *file, bool create,
-				struct tee_file_handle **fh)
+static TEE_Result get_offs_size(enum tee_fs_htree_type type, size_t idx,
+				uint8_t vers, size_t *offs, size_t *size)
 {
-	TEE_Result res;
-	size_t len;
-	struct tee_fs_fd *fdp = NULL;
+	const size_t node_size = sizeof(struct tee_fs_htree_node_image);
+	const size_t block_nodes = BLOCK_SIZE / (node_size * 2);
+	size_t pbn;
+	size_t bidx;
 
-	if (!file)
-		return TEE_ERROR_BAD_PARAMETERS;
+	assert(vers == 0 || vers == 1);
 
-	len = strlen(file) + 1;
-	if (len > TEE_FS_NAME_MAX)
-		return TEE_ERROR_BAD_PARAMETERS;
+	/*
+	 * File layout
+	 * [demo with input:
+	 * BLOCK_SIZE = 4096,
+	 * node_size = 66,
+	 * block_nodes = 4096/(66*2) = 31 ]
+	 *
+	 * phys block 0:
+	 * tee_fs_htree_image vers 0 @ offs = 0
+	 * tee_fs_htree_image vers 1 @ offs = sizeof(tee_fs_htree_image)
+	 *
+	 * phys block 1:
+	 * tee_fs_htree_node_image 0  vers 0 @ offs = 0
+	 * tee_fs_htree_node_image 0  vers 1 @ offs = node_size
+	 * tee_fs_htree_node_image 1  vers 0 @ offs = node_size * 2
+	 * tee_fs_htree_node_image 1  vers 1 @ offs = node_size * 3
+	 * ...
+	 * tee_fs_htree_node_image 30 vers 0 @ offs = node_size * 60
+	 * tee_fs_htree_node_image 30 vers 1 @ offs = node_size * 61
+	 *
+	 * phys block 2:
+	 * data block 0 vers 0
+	 *
+	 * phys block 3:
+	 * data block 0 vers 1
+	 *
+	 * ...
+	 * phys block 62:
+	 * data block 30 vers 0
+	 *
+	 * phys block 63:
+	 * data block 30 vers 1
+	 *
+	 * phys block 64:
+	 * tee_fs_htree_node_image 31  vers 0 @ offs = 0
+	 * tee_fs_htree_node_image 31  vers 1 @ offs = node_size
+	 * tee_fs_htree_node_image 32  vers 0 @ offs = node_size * 2
+	 * tee_fs_htree_node_image 32  vers 1 @ offs = node_size * 3
+	 * ...
+	 * tee_fs_htree_node_image 61 vers 0 @ offs = node_size * 60
+	 * tee_fs_htree_node_image 61 vers 1 @ offs = node_size * 61
+	 *
+	 * phys block 65:
+	 * data block 31 vers 0
+	 *
+	 * phys block 66:
+	 * data block 31 vers 1
+	 * ...
+	 */
 
-	fdp = calloc(1, sizeof(struct tee_fs_fd));
-	if (!fdp)
-		return TEE_ERROR_OUT_OF_MEMORY;
-	fdp->fd = -1;
-
-	mutex_lock(&ree_fs_mutex);
-
-	if (create)
-		res = create_meta(fdp, file);
-	else
-		res = read_meta(fdp, file);
-
-	if (res == TEE_SUCCESS) {
-		*fh = (struct tee_file_handle *)fdp;
-	} else {
-		if (fdp->fd != -1)
-			tee_fs_rpc_close(OPTEE_MSG_RPC_CMD_FS, fdp->fd);
-		if (create)
-			tee_fs_rpc_remove(OPTEE_MSG_RPC_CMD_FS, file);
-		free(fdp);
-	}
-
-	mutex_unlock(&ree_fs_mutex);
-	return res;
-}
-
-static TEE_Result ree_fs_open(const char *file, struct tee_file_handle **fh)
-{
-	return open_internal(file, false, fh);
-}
-
-static TEE_Result ree_fs_create(const char *file, struct tee_file_handle **fh)
-{
-	return open_internal(file, true, fh);
-}
-
-static void ree_fs_close(struct tee_file_handle **fh)
-{
-	struct tee_fs_fd *fdp = (struct tee_fs_fd *)*fh;
-
-	if (fdp) {
-		tee_fs_rpc_close(OPTEE_MSG_RPC_CMD_FS, fdp->fd);
-		free(fdp);
-		*fh = NULL;
-	}
-}
-
-static TEE_Result ree_fs_seek(struct tee_file_handle *fh, int32_t offset,
-			      TEE_Whence whence, int32_t *new_offs)
-{
-	TEE_Result res;
-	tee_fs_off_t new_pos;
-	size_t filelen;
-	struct tee_fs_fd *fdp = (struct tee_fs_fd *)fh;
-
-	mutex_lock(&ree_fs_mutex);
-
-	DMSG("offset=%d, whence=%d", (int)offset, whence);
-
-	filelen = fdp->meta.info.length;
-
-	switch (whence) {
-	case TEE_DATA_SEEK_SET:
-		new_pos = offset;
-		break;
-
-	case TEE_DATA_SEEK_CUR:
-		new_pos = fdp->pos + offset;
-		break;
-
-	case TEE_DATA_SEEK_END:
-		new_pos = filelen + offset;
-		break;
-
+	switch (type) {
+	case TEE_FS_HTREE_TYPE_HEAD:
+		*offs = sizeof(struct tee_fs_htree_image) * vers;
+		*size = sizeof(struct tee_fs_htree_image);
+		return TEE_SUCCESS;
+	case TEE_FS_HTREE_TYPE_NODE:
+		pbn = 1 + ((idx / block_nodes) * block_nodes * 2);
+		*offs = pbn * BLOCK_SIZE +
+			2 * node_size * (idx % block_nodes) +
+			node_size * vers;
+		*size = node_size;
+		return TEE_SUCCESS;
+	case TEE_FS_HTREE_TYPE_BLOCK:
+		bidx = 2 * idx + vers;
+		pbn = 2 + bidx + bidx / (block_nodes * 2 - 1);
+		*offs = pbn * BLOCK_SIZE;
+		*size = BLOCK_SIZE;
+		return TEE_SUCCESS;
 	default:
-		res = TEE_ERROR_BAD_PARAMETERS;
-		goto exit;
+		return TEE_ERROR_GENERIC;
 	}
-
-	if (new_pos < 0)
-		new_pos = 0;
-
-	if (new_pos > TEE_DATA_MAX_POSITION) {
-		EMSG("Position is beyond TEE_DATA_MAX_POSITION");
-		res = TEE_ERROR_BAD_PARAMETERS;
-		goto exit;
-	}
-
-	fdp->pos = new_pos;
-	if (new_offs)
-		*new_offs = new_pos;
-	res = TEE_SUCCESS;
-exit:
-	mutex_unlock(&ree_fs_mutex);
-	return res;
 }
 
-/*
- * To ensure atomic truncate operation, we can:
- *
- *  - update file length to new length
- *  - commit new meta
- *
- * To ensure atomic extend operation, we can:
- *
- *  - update file length to new length
- *  - allocate and fill zero data to new blocks
- *  - commit new meta
- *
- * Any failure before committing new meta is considered as
- * update failed, and the file content will not be updated
- */
+static TEE_Result ree_fs_rpc_read_init(void *aux,
+				       struct tee_fs_rpc_operation *op,
+				       enum tee_fs_htree_type type, size_t idx,
+				       uint8_t vers, void **data)
+{
+	struct tee_fs_fd *fdp = aux;
+	TEE_Result res;
+	size_t offs;
+	size_t size;
+
+	res = get_offs_size(type, idx, vers, &offs, &size);
+	if (res != TEE_SUCCESS)
+		return res;
+
+	return tee_fs_rpc_read_init(op, OPTEE_RPC_CMD_FS, fdp->fd,
+				    offs, size, data);
+}
+
+static TEE_Result ree_fs_rpc_write_init(void *aux,
+					struct tee_fs_rpc_operation *op,
+					enum tee_fs_htree_type type, size_t idx,
+					uint8_t vers, void **data)
+{
+	struct tee_fs_fd *fdp = aux;
+	TEE_Result res;
+	size_t offs;
+	size_t size;
+
+	res = get_offs_size(type, idx, vers, &offs, &size);
+	if (res != TEE_SUCCESS)
+		return res;
+
+	return tee_fs_rpc_write_init(op, OPTEE_RPC_CMD_FS, fdp->fd,
+				     offs, size, data);
+}
+
+static const struct tee_fs_htree_storage ree_fs_storage_ops = {
+	.block_size = BLOCK_SIZE,
+	.rpc_read_init = ree_fs_rpc_read_init,
+	.rpc_read_final = tee_fs_rpc_read_final,
+	.rpc_write_init = ree_fs_rpc_write_init,
+	.rpc_write_final = tee_fs_rpc_write_final,
+};
+
 static TEE_Result ree_fs_ftruncate_internal(struct tee_fs_fd *fdp,
 					    tee_fs_off_t new_file_len)
 {
 	TEE_Result res;
-	size_t old_file_len = fdp->meta.info.length;
-	struct tee_fs_file_meta new_meta;
+	struct tee_fs_htree_meta *meta = tee_fs_htree_get_meta(fdp->ht);
 
-	if (new_file_len > MAX_FILE_SIZE)
-		return TEE_ERROR_BAD_PARAMETERS;
+	if ((size_t)new_file_len > meta->length) {
+		size_t ext_len = new_file_len - meta->length;
 
-	new_meta = fdp->meta;
-	new_meta.info.length = new_file_len;
-
-	if ((size_t)new_file_len > old_file_len) {
-		size_t ext_len = new_file_len - old_file_len;
-		int orig_pos = fdp->pos;
-
-		fdp->pos = old_file_len;
-		res = out_of_place_write(fdp, NULL, ext_len, &new_meta);
-		fdp->pos = orig_pos;
+		res = out_of_place_write(fdp, meta->length, NULL, NULL,
+					 ext_len);
 		if (res != TEE_SUCCESS)
 			return res;
+	} else {
+		size_t offs;
+		size_t sz;
+
+		res = get_offs_size(TEE_FS_HTREE_TYPE_BLOCK,
+				    ROUNDUP(new_file_len, BLOCK_SIZE) /
+					BLOCK_SIZE, 1, &offs, &sz);
+		if (res != TEE_SUCCESS)
+			return res;
+
+		res = tee_fs_htree_truncate(&fdp->ht,
+					    new_file_len / BLOCK_SIZE);
+		if (res != TEE_SUCCESS)
+			return res;
+
+		res = tee_fs_rpc_truncate(OPTEE_RPC_CMD_FS, fdp->fd,
+					  offs + sz);
+		if (res != TEE_SUCCESS)
+			return res;
+
+		meta->length = new_file_len;
+		tee_fs_htree_meta_set_dirty(fdp->ht);
 	}
 
-	return commit_meta_file(fdp, &new_meta);
+	return TEE_SUCCESS;
 }
 
-static TEE_Result ree_fs_read(struct tee_file_handle *fh, void *buf,
-			      size_t *len)
+static TEE_Result ree_fs_read_primitive(struct tee_file_handle *fh, size_t pos,
+					void *buf_core, void *buf_user,
+					size_t *len)
 {
 	TEE_Result res;
 	int start_block_num;
 	int end_block_num;
 	size_t remain_bytes;
-	uint8_t *data_ptr = buf;
+	uint8_t *data_core_ptr = buf_core;
+	uint8_t *data_user_ptr = buf_user;
 	uint8_t *block = NULL;
 	struct tee_fs_fd *fdp = (struct tee_fs_fd *)fh;
+	struct tee_fs_htree_meta *meta = tee_fs_htree_get_meta(fdp->ht);
 
-	mutex_lock(&ree_fs_mutex);
+	/* One of buf_core and buf_user must be NULL */
+	assert(!buf_core || !buf_user);
 
 	remain_bytes = *len;
-	if ((fdp->pos + remain_bytes) < remain_bytes ||
-	    fdp->pos > (tee_fs_off_t)fdp->meta.info.length)
+	if ((pos + remain_bytes) < remain_bytes || pos > meta->length)
 		remain_bytes = 0;
-	else if (fdp->pos + (tee_fs_off_t)remain_bytes >
-		(tee_fs_off_t)fdp->meta.info.length)
-		remain_bytes = fdp->meta.info.length - fdp->pos;
+	else if (pos + remain_bytes > meta->length)
+		remain_bytes = meta->length - pos;
 
 	*len = remain_bytes;
 
@@ -650,115 +338,645 @@ static TEE_Result ree_fs_read(struct tee_file_handle *fh, void *buf,
 		goto exit;
 	}
 
-	start_block_num = pos_to_block_num(fdp->pos);
-	end_block_num = pos_to_block_num(fdp->pos + remain_bytes - 1);
+	start_block_num = pos_to_block_num(pos);
+	end_block_num = pos_to_block_num(pos + remain_bytes - 1);
 
-	block = malloc(BLOCK_SIZE);
+	block = get_tmp_block();
 	if (!block) {
 		res = TEE_ERROR_OUT_OF_MEMORY;
 		goto exit;
 	}
 
 	while (start_block_num <= end_block_num) {
-		tee_fs_off_t offset = fdp->pos % BLOCK_SIZE;
+		size_t offset = pos % BLOCK_SIZE;
 		size_t size_to_read = MIN(remain_bytes, (size_t)BLOCK_SIZE);
 
 		if (size_to_read + offset > BLOCK_SIZE)
 			size_to_read = BLOCK_SIZE - offset;
 
-		res = read_block(fdp, start_block_num, block);
-		if (res != TEE_SUCCESS) {
-			if (res == TEE_ERROR_MAC_INVALID)
-				res = TEE_ERROR_CORRUPT_OBJECT;
+		res = tee_fs_htree_read_block(&fdp->ht, start_block_num, block);
+		if (res != TEE_SUCCESS)
 			goto exit;
+
+		if (data_core_ptr) {
+			memcpy(data_core_ptr, block + offset, size_to_read);
+			data_core_ptr += size_to_read;
+		} else if (data_user_ptr) {
+			res = copy_to_user(data_user_ptr, block + offset,
+					   size_to_read);
+			if (res)
+				goto exit;
+			data_user_ptr += size_to_read;
 		}
 
-		memcpy(data_ptr, block + offset, size_to_read);
-
-		data_ptr += size_to_read;
 		remain_bytes -= size_to_read;
-		fdp->pos += size_to_read;
+		pos += size_to_read;
 
 		start_block_num++;
 	}
 	res = TEE_SUCCESS;
 exit:
-	mutex_unlock(&ree_fs_mutex);
-	free(block);
+	if (block)
+		put_tmp_block(block);
 	return res;
 }
 
-/*
- * To ensure atomicity of write operation, we need to
- * do the following steps:
- * (The sequence of operations is very important)
- *
- *  - Create a new backup version of meta file as a copy
- *    of current meta file.
- *  - For each blocks to write:
- *    - Create new backup version for current block.
- *    - Write data to new backup version.
- *    - Update the new meta file accordingly.
- *  - Write the new meta file.
- *
- * (Any failure in above steps is considered as update failed,
- *  and the file content will not be updated)
- */
-static TEE_Result ree_fs_write(struct tee_file_handle *fh, const void *buf,
-			       size_t len)
+static TEE_Result ree_fs_read(struct tee_file_handle *fh, size_t pos,
+			      void *buf_core, void *buf_user, size_t *len)
 {
 	TEE_Result res;
-	struct tee_fs_file_meta new_meta;
+
+	mutex_lock(&ree_fs_mutex);
+	res = ree_fs_read_primitive(fh, pos, buf_core, buf_user, len);
+	mutex_unlock(&ree_fs_mutex);
+
+	return res;
+}
+
+static TEE_Result ree_fs_write_primitive(struct tee_file_handle *fh, size_t pos,
+					 const void *buf_core,
+					 const void *buf_user, size_t len)
+{
+	TEE_Result res;
 	struct tee_fs_fd *fdp = (struct tee_fs_fd *)fh;
 	size_t file_size;
+
+	/* One of buf_core and buf_user must be NULL */
+	assert(!buf_core || !buf_user);
 
 	if (!len)
 		return TEE_SUCCESS;
 
-	mutex_lock(&ree_fs_mutex);
+	file_size = tee_fs_htree_get_meta(fdp->ht)->length;
 
-	file_size = fdp->meta.info.length;
+	if ((pos + len) < len)
+		return TEE_ERROR_BAD_PARAMETERS;
 
-	if ((fdp->pos + len) > MAX_FILE_SIZE || (fdp->pos + len) < len) {
-		res = TEE_ERROR_BAD_PARAMETERS;
-		goto exit;
-	}
-
-	if (file_size < (size_t)fdp->pos) {
-		res = ree_fs_ftruncate_internal(fdp, fdp->pos);
+	if (file_size < pos) {
+		res = ree_fs_ftruncate_internal(fdp, pos);
 		if (res != TEE_SUCCESS)
-			goto exit;
+			return res;
 	}
 
-	new_meta = fdp->meta;
-	res = out_of_place_write(fdp, buf, len, &new_meta);
-	if (res != TEE_SUCCESS)
-		goto exit;
+	return out_of_place_write(fdp, pos, buf_core, buf_user, len);
+}
 
-	res = commit_meta_file(fdp, &new_meta);
-exit:
-	mutex_unlock(&ree_fs_mutex);
+static TEE_Result ree_fs_open_primitive(bool create, uint8_t *hash,
+					uint32_t min_counter,
+					const TEE_UUID *uuid,
+					struct tee_fs_dirfile_fileh *dfh,
+					struct tee_file_handle **fh)
+{
+	TEE_Result res;
+	struct tee_fs_fd *fdp;
+
+	fdp = calloc(1, sizeof(struct tee_fs_fd));
+	if (!fdp)
+		return TEE_ERROR_OUT_OF_MEMORY;
+	fdp->fd = -1;
+	fdp->uuid = uuid;
+
+	if (create)
+		res = tee_fs_rpc_create_dfh(OPTEE_RPC_CMD_FS,
+					    dfh, &fdp->fd);
+	else
+		res = tee_fs_rpc_open_dfh(OPTEE_RPC_CMD_FS, dfh, &fdp->fd);
+
+	if (res != TEE_SUCCESS)
+		goto out;
+
+	res = tee_fs_htree_open(create, hash, min_counter, uuid,
+				&ree_fs_storage_ops, fdp, &fdp->ht);
+out:
+	if (res == TEE_SUCCESS) {
+		if (dfh)
+			fdp->dfh = *dfh;
+		else
+			fdp->dfh.idx = -1;
+		*fh = (struct tee_file_handle *)fdp;
+	} else {
+		if (res == TEE_ERROR_SECURITY)
+			DMSG("Secure storage corruption detected");
+		if (fdp->fd != -1)
+			tee_fs_rpc_close(OPTEE_RPC_CMD_FS, fdp->fd);
+		if (create)
+			tee_fs_rpc_remove_dfh(OPTEE_RPC_CMD_FS, dfh);
+		free(fdp);
+	}
+
 	return res;
 }
 
-static TEE_Result ree_fs_rename(const char *old, const char *new,
+static void ree_fs_close_primitive(struct tee_file_handle *fh)
+{
+	struct tee_fs_fd *fdp = (struct tee_fs_fd *)fh;
+
+	if (fdp) {
+		tee_fs_htree_close(&fdp->ht);
+		tee_fs_rpc_close(OPTEE_RPC_CMD_FS, fdp->fd);
+		free(fdp);
+	}
+}
+
+static TEE_Result ree_dirf_commit_writes(struct tee_file_handle *fh,
+					 uint8_t *hash, uint32_t *counter)
+{
+	TEE_Result res;
+	struct tee_fs_fd *fdp = (struct tee_fs_fd *)fh;
+
+	res = tee_fs_htree_sync_to_storage(&fdp->ht, fdp->dfh.hash, counter);
+
+	if (!res && hash)
+		memcpy(hash, fdp->dfh.hash, sizeof(fdp->dfh.hash));
+
+	return res;
+}
+
+static TEE_Result dirf_read(struct tee_file_handle *fh, size_t pos, void *buf,
+			    size_t *len)
+{
+	return ree_fs_read_primitive(fh, pos, buf, NULL, len);
+}
+
+static TEE_Result dirf_write(struct tee_file_handle *fh, size_t pos,
+			     const void *buf, size_t len)
+{
+	return ree_fs_write_primitive(fh, pos, buf, NULL, len);
+}
+
+static const struct tee_fs_dirfile_operations ree_dirf_ops = {
+	.open = ree_fs_open_primitive,
+	.close = ree_fs_close_primitive,
+	.read = dirf_read,
+	.write = dirf_write,
+	.commit_writes = ree_dirf_commit_writes,
+};
+
+static struct tee_fs_dirfile_dirh *ree_fs_dirh;
+static size_t ree_fs_dirh_refcount;
+
+#ifdef CFG_REE_FS_INTEGRITY_RPMB
+static struct tee_file_handle *ree_fs_rpmb_fh;
+
+static TEE_Result open_dirh(struct tee_fs_dirfile_dirh **dirh)
+{
+	TEE_Result res;
+	uint8_t hash[TEE_FS_HTREE_HASH_SIZE];
+	uint8_t *hashp = NULL;
+	const char fname[] = "dirfile.db.hash";
+
+	res = tee_rpmb_fs_raw_open(fname, false, &ree_fs_rpmb_fh);
+	if (!res) {
+		size_t l = sizeof(hash);
+
+		res = rpmb_fs_ops.read(ree_fs_rpmb_fh, 0, hash, NULL, &l);
+		if (res)
+			return res;
+		if (l == sizeof(hash))
+			hashp = hash;
+	} else if (res == TEE_ERROR_ITEM_NOT_FOUND) {
+		res = tee_rpmb_fs_raw_open(fname, true, &ree_fs_rpmb_fh);
+	}
+	if (res)
+		return res;
+
+	res = tee_fs_dirfile_open(false, hashp, 0, &ree_dirf_ops, dirh);
+
+	if (res == TEE_ERROR_ITEM_NOT_FOUND) {
+		if (hashp) {
+			if (IS_ENABLED(CFG_REE_FS_ALLOW_RESET)) {
+				DMSG("dirf.db not found, clear hash in RPMB");
+				res = rpmb_fs_ops.truncate(ree_fs_rpmb_fh, 0);
+				if (res) {
+					DMSG("Can't clear hash: %#"PRIx32, res);
+					res = TEE_ERROR_SECURITY;
+					goto out;
+				}
+			} else {
+				DMSG("dirf.db file not found");
+				res = TEE_ERROR_SECURITY;
+				goto out;
+			}
+		}
+
+		res = tee_fs_dirfile_open(true, NULL, 0, &ree_dirf_ops, dirh);
+	}
+
+out:
+	if (res)
+		rpmb_fs_ops.close(&ree_fs_rpmb_fh);
+
+	return res;
+}
+
+static TEE_Result commit_dirh_writes(struct tee_fs_dirfile_dirh *dirh)
+{
+	TEE_Result res;
+	uint8_t hash[TEE_FS_HTREE_HASH_SIZE];
+
+	res = tee_fs_dirfile_commit_writes(dirh, hash, NULL);
+	if (res)
+		return res;
+	return rpmb_fs_ops.write(ree_fs_rpmb_fh, 0, hash, NULL, sizeof(hash));
+}
+
+static void close_dirh(struct tee_fs_dirfile_dirh **dirh)
+{
+	tee_fs_dirfile_close(*dirh);
+	*dirh = NULL;
+	rpmb_fs_ops.close(&ree_fs_rpmb_fh);
+}
+
+#else /*!CFG_REE_FS_INTEGRITY_RPMB*/
+static TEE_Result open_dirh(struct tee_fs_dirfile_dirh **dirh)
+{
+	TEE_Result res = TEE_SUCCESS;
+	uint32_t min_counter = 0;
+
+	res = nv_counter_get_ree_fs(&min_counter);
+	if (res) {
+		static bool once;
+
+		if (res != TEE_ERROR_NOT_IMPLEMENTED ||
+		    !IS_ENABLED(CFG_INSECURE))
+			return res;
+
+		if (!once) {
+			IMSG("WARNING (insecure configuration): Failed to get monotonic counter for REE FS, using 0");
+			once = true;
+		}
+		min_counter = 0;
+	}
+	res = tee_fs_dirfile_open(false, NULL, min_counter, &ree_dirf_ops,
+				  dirh);
+	if (res == TEE_ERROR_ITEM_NOT_FOUND) {
+		if (min_counter) {
+			if (!IS_ENABLED(CFG_REE_FS_ALLOW_RESET)) {
+				DMSG("dirf.db file not found");
+				return TEE_ERROR_SECURITY;
+			}
+			DMSG("dirf.db not found, initializing with a non-zero monotonic counter");
+		}
+		return tee_fs_dirfile_open(true, NULL, min_counter,
+					   &ree_dirf_ops, dirh);
+	}
+
+	return res;
+}
+
+static TEE_Result commit_dirh_writes(struct tee_fs_dirfile_dirh *dirh)
+{
+	TEE_Result res = TEE_SUCCESS;
+	uint32_t counter = 0;
+
+	res = tee_fs_dirfile_commit_writes(dirh, NULL, &counter);
+	if (res)
+		return res;
+	res = nv_counter_incr_ree_fs_to(counter);
+	if (res == TEE_ERROR_NOT_IMPLEMENTED && IS_ENABLED(CFG_INSECURE)) {
+		static bool once;
+
+		if (!once) {
+			IMSG("WARNING (insecure configuration): Failed to commit dirh counter %"PRIu32, counter);
+			once = true;
+		}
+		return TEE_SUCCESS;
+	}
+	return res;
+}
+
+static void close_dirh(struct tee_fs_dirfile_dirh **dirh)
+{
+	tee_fs_dirfile_close(*dirh);
+	*dirh = NULL;
+}
+#endif /*!CFG_REE_FS_INTEGRITY_RPMB*/
+
+static TEE_Result get_dirh(struct tee_fs_dirfile_dirh **dirh)
+{
+	if (!ree_fs_dirh) {
+		TEE_Result res = open_dirh(&ree_fs_dirh);
+
+		if (res) {
+			*dirh = NULL;
+			return res;
+		}
+	}
+	ree_fs_dirh_refcount++;
+	assert(ree_fs_dirh);
+	assert(ree_fs_dirh_refcount);
+	*dirh = ree_fs_dirh;
+	return TEE_SUCCESS;
+}
+
+static void put_dirh_primitive(bool close)
+{
+	assert(ree_fs_dirh_refcount);
+
+	/*
+	 * During the execution of one of the ree_fs_ops ree_fs_dirh is
+	 * guareteed to be a valid pointer. But when the fop has returned
+	 * another thread may get an error or something causing that fop
+	 * to do a put with close=1.
+	 *
+	 * For all fops but ree_fs_close() there's a call to get_dirh() to
+	 * get a new dirh which will open it again if it was closed before.
+	 * But in the ree_fs_close() case there's no call to get_dirh()
+	 * only to this function, put_dirh_primitive(), and in this case
+	 * ree_fs_dirh may actually be NULL.
+	 */
+	ree_fs_dirh_refcount--;
+	if (ree_fs_dirh && (!ree_fs_dirh_refcount || close))
+		close_dirh(&ree_fs_dirh);
+}
+
+static void put_dirh(struct tee_fs_dirfile_dirh *dirh, bool close)
+{
+	if (dirh) {
+		assert(dirh == ree_fs_dirh);
+		put_dirh_primitive(close);
+	}
+}
+
+static TEE_Result ree_fs_open(struct tee_pobj *po, size_t *size,
+			      struct tee_file_handle **fh)
+{
+	TEE_Result res;
+	struct tee_fs_dirfile_dirh *dirh = NULL;
+	struct tee_fs_dirfile_fileh dfh;
+
+	mutex_lock(&ree_fs_mutex);
+
+	res = get_dirh(&dirh);
+	if (res != TEE_SUCCESS)
+		goto out;
+
+	res = tee_fs_dirfile_find(dirh, &po->uuid, po->obj_id, po->obj_id_len,
+				  &dfh);
+	if (res != TEE_SUCCESS)
+		goto out;
+
+	res = ree_fs_open_primitive(false, dfh.hash, 0, &po->uuid, &dfh, fh);
+	if (res == TEE_ERROR_ITEM_NOT_FOUND) {
+		/*
+		 * If the object isn't found someone has tampered with it,
+		 * treat it as corrupt.
+		 */
+		res = TEE_ERROR_CORRUPT_OBJECT;
+	} else if (!res && size) {
+		struct tee_fs_fd *fdp = (struct tee_fs_fd *)*fh;
+
+		*size = tee_fs_htree_get_meta(fdp->ht)->length;
+	}
+
+out:
+	if (res)
+		put_dirh(dirh, true);
+	mutex_unlock(&ree_fs_mutex);
+
+	return res;
+}
+
+static TEE_Result set_name(struct tee_fs_dirfile_dirh *dirh,
+			   struct tee_fs_fd *fdp, struct tee_pobj *po,
+			   bool overwrite)
+{
+	TEE_Result res;
+	bool have_old_dfh = false;
+	struct tee_fs_dirfile_fileh old_dfh = { .idx = -1 };
+
+	res = tee_fs_dirfile_find(dirh, &po->uuid, po->obj_id, po->obj_id_len,
+				  &old_dfh);
+	if (!overwrite && !res)
+		return TEE_ERROR_ACCESS_CONFLICT;
+
+	if (!res)
+		have_old_dfh = true;
+
+	/*
+	 * If old_dfh wasn't found, the idx will be -1 and
+	 * tee_fs_dirfile_rename() will allocate a new index.
+	 */
+	fdp->dfh.idx = old_dfh.idx;
+	old_dfh.idx = -1;
+	res = tee_fs_dirfile_rename(dirh, &po->uuid, &fdp->dfh,
+				    po->obj_id, po->obj_id_len);
+	if (res)
+		return res;
+
+	res = commit_dirh_writes(dirh);
+	if (res)
+		return res;
+
+	if (have_old_dfh)
+		tee_fs_rpc_remove_dfh(OPTEE_RPC_CMD_FS, &old_dfh);
+
+	return TEE_SUCCESS;
+}
+
+static void ree_fs_close(struct tee_file_handle **fh)
+{
+	if (*fh) {
+		mutex_lock(&ree_fs_mutex);
+		put_dirh_primitive(false);
+		ree_fs_close_primitive(*fh);
+		*fh = NULL;
+		mutex_unlock(&ree_fs_mutex);
+
+	}
+}
+
+static TEE_Result ree_fs_create(struct tee_pobj *po, bool overwrite,
+				const void *head, size_t head_size,
+				const void *attr, size_t attr_size,
+				const void *data_core, const void *data_user,
+				size_t data_size, struct tee_file_handle **fh)
+{
+	struct tee_fs_fd *fdp;
+	struct tee_fs_dirfile_dirh *dirh = NULL;
+	struct tee_fs_dirfile_fileh dfh;
+	TEE_Result res;
+	size_t pos = 0;
+
+	/* One of data_core and data_user must be NULL */
+	assert(!data_core || !data_user);
+
+	*fh = NULL;
+	mutex_lock(&ree_fs_mutex);
+
+	res = get_dirh(&dirh);
+	if (res)
+		goto out;
+
+	res = tee_fs_dirfile_get_tmp(dirh, &dfh);
+	if (res)
+		goto out;
+
+	res = ree_fs_open_primitive(true, dfh.hash, 0, &po->uuid, &dfh, fh);
+	if (res)
+		goto out;
+
+	if (head && head_size) {
+		res = ree_fs_write_primitive(*fh, pos, head, NULL, head_size);
+		if (res)
+			goto out;
+		pos += head_size;
+	}
+
+	if (attr && attr_size) {
+		res = ree_fs_write_primitive(*fh, pos, attr, NULL, attr_size);
+		if (res)
+			goto out;
+		pos += attr_size;
+	}
+
+	if ((data_core || data_user) && data_size) {
+		res = ree_fs_write_primitive(*fh, pos, data_core, data_user,
+					     data_size);
+		if (res)
+			goto out;
+	}
+
+	fdp = (struct tee_fs_fd *)*fh;
+	res = tee_fs_htree_sync_to_storage(&fdp->ht, fdp->dfh.hash, NULL);
+	if (res)
+		goto out;
+
+	res = set_name(dirh, fdp, po, overwrite);
+out:
+	if (res) {
+		put_dirh(dirh, true);
+		if (*fh) {
+			ree_fs_close_primitive(*fh);
+			*fh = NULL;
+			tee_fs_rpc_remove_dfh(OPTEE_RPC_CMD_FS, &dfh);
+		}
+	}
+	mutex_unlock(&ree_fs_mutex);
+
+	return res;
+}
+
+static TEE_Result ree_fs_write(struct tee_file_handle *fh, size_t pos,
+			       const void *buf_core, const void *buf_user,
+			       size_t len)
+{
+	TEE_Result res;
+	struct tee_fs_dirfile_dirh *dirh = NULL;
+	struct tee_fs_fd *fdp = (struct tee_fs_fd *)fh;
+
+	/* One of buf_core and buf_user must be NULL */
+	assert(!buf_core || !buf_user);
+
+	mutex_lock(&ree_fs_mutex);
+
+	res = get_dirh(&dirh);
+	if (res)
+		goto out;
+
+	res = ree_fs_write_primitive(fh, pos, buf_core, buf_user, len);
+	if (res)
+		goto out;
+
+	res = tee_fs_htree_sync_to_storage(&fdp->ht, fdp->dfh.hash, NULL);
+	if (res)
+		goto out;
+
+	res = tee_fs_dirfile_update_hash(dirh, &fdp->dfh);
+	if (res)
+		goto out;
+	res = commit_dirh_writes(dirh);
+out:
+	put_dirh(dirh, res);
+	mutex_unlock(&ree_fs_mutex);
+
+	return res;
+}
+
+static TEE_Result ree_fs_rename(struct tee_pobj *old, struct tee_pobj *new,
 				bool overwrite)
 {
 	TEE_Result res;
+	struct tee_fs_dirfile_dirh *dirh = NULL;
+	struct tee_fs_dirfile_fileh dfh;
+	struct tee_fs_dirfile_fileh remove_dfh = { .idx = -1 };
+
+	if (!new)
+		return TEE_ERROR_BAD_PARAMETERS;
 
 	mutex_lock(&ree_fs_mutex);
-	res = tee_fs_rpc_rename(OPTEE_MSG_RPC_CMD_FS, old, new, overwrite);
+	res = get_dirh(&dirh);
+	if (res)
+		goto out;
+
+	res = tee_fs_dirfile_find(dirh, &new->uuid, new->obj_id,
+				  new->obj_id_len, &remove_dfh);
+	if (!res && !overwrite) {
+		res = TEE_ERROR_ACCESS_CONFLICT;
+		goto out;
+	}
+
+	res = tee_fs_dirfile_find(dirh, &old->uuid, old->obj_id,
+				  old->obj_id_len, &dfh);
+	if (res)
+		goto out;
+
+	res = tee_fs_dirfile_rename(dirh, &new->uuid, &dfh, new->obj_id,
+				    new->obj_id_len);
+	if (res)
+		goto out;
+
+	if (remove_dfh.idx != -1) {
+		res = tee_fs_dirfile_remove(dirh, &remove_dfh);
+		if (res)
+			goto out;
+	}
+
+	res = commit_dirh_writes(dirh);
+	if (res)
+		goto out;
+
+	if (remove_dfh.idx != -1)
+		tee_fs_rpc_remove_dfh(OPTEE_RPC_CMD_FS, &remove_dfh);
+
+out:
+	put_dirh(dirh, res);
 	mutex_unlock(&ree_fs_mutex);
 
 	return res;
+
 }
 
-static TEE_Result ree_fs_remove(const char *file)
+static TEE_Result ree_fs_remove(struct tee_pobj *po)
 {
 	TEE_Result res;
+	struct tee_fs_dirfile_dirh *dirh = NULL;
+	struct tee_fs_dirfile_fileh dfh;
 
 	mutex_lock(&ree_fs_mutex);
-	res = tee_fs_rpc_remove(OPTEE_MSG_RPC_CMD_FS, file);
+	res = get_dirh(&dirh);
+	if (res)
+		goto out;
+
+	res = tee_fs_dirfile_find(dirh, &po->uuid, po->obj_id, po->obj_id_len,
+				  &dfh);
+	if (res)
+		goto out;
+
+	res = tee_fs_dirfile_remove(dirh, &dfh);
+	if (res)
+		goto out;
+
+	res = commit_dirh_writes(dirh);
+	if (res)
+		goto out;
+
+	tee_fs_rpc_remove_dfh(OPTEE_RPC_CMD_FS, &dfh);
+
+	assert(tee_fs_dirfile_find(dirh, &po->uuid, po->obj_id, po->obj_id_len,
+				   &dfh));
+out:
+	put_dirh(dirh, res);
 	mutex_unlock(&ree_fs_mutex);
 
 	return res;
@@ -767,10 +985,97 @@ static TEE_Result ree_fs_remove(const char *file)
 static TEE_Result ree_fs_truncate(struct tee_file_handle *fh, size_t len)
 {
 	TEE_Result res;
+	struct tee_fs_dirfile_dirh *dirh = NULL;
 	struct tee_fs_fd *fdp = (struct tee_fs_fd *)fh;
 
 	mutex_lock(&ree_fs_mutex);
+
+	res = get_dirh(&dirh);
+	if (res)
+		goto out;
+
 	res = ree_fs_ftruncate_internal(fdp, len);
+	if (res)
+		goto out;
+
+	res = tee_fs_htree_sync_to_storage(&fdp->ht, fdp->dfh.hash, NULL);
+	if (res)
+		goto out;
+
+	res = tee_fs_dirfile_update_hash(dirh, &fdp->dfh);
+	if (res)
+		goto out;
+	res = commit_dirh_writes(dirh);
+out:
+	put_dirh(dirh, res);
+	mutex_unlock(&ree_fs_mutex);
+
+	return res;
+}
+
+static TEE_Result ree_fs_opendir_rpc(const TEE_UUID *uuid,
+				     struct tee_fs_dir **dir)
+
+{
+	TEE_Result res;
+	struct tee_fs_dir *d = calloc(1, sizeof(*d));
+
+	if (!d)
+		return TEE_ERROR_OUT_OF_MEMORY;
+
+	d->uuid = uuid;
+
+	mutex_lock(&ree_fs_mutex);
+
+	res = get_dirh(&d->dirh);
+	if (res)
+		goto out;
+
+	/* See that there's at least one file */
+	d->idx = -1;
+	d->d.oidlen = sizeof(d->d.oid);
+	res = tee_fs_dirfile_get_next(d->dirh, d->uuid, &d->idx, d->d.oid,
+				      &d->d.oidlen);
+	d->idx = -1;
+
+out:
+	if (!res) {
+		*dir = d;
+	} else {
+		if (d)
+			put_dirh(d->dirh, false);
+		free(d);
+	}
+	mutex_unlock(&ree_fs_mutex);
+
+	return res;
+}
+
+static void ree_fs_closedir_rpc(struct tee_fs_dir *d)
+{
+	if (d) {
+		mutex_lock(&ree_fs_mutex);
+
+		put_dirh(d->dirh, false);
+		free(d);
+
+		mutex_unlock(&ree_fs_mutex);
+	}
+}
+
+static TEE_Result ree_fs_readdir_rpc(struct tee_fs_dir *d,
+				     struct tee_fs_dirent **ent)
+{
+	TEE_Result res;
+
+	mutex_lock(&ree_fs_mutex);
+
+	d->d.oidlen = sizeof(d->d.oid);
+	res = tee_fs_dirfile_get_next(d->dirh, d->uuid, &d->idx, d->d.oid,
+				      &d->d.oidlen);
+	if (res == TEE_SUCCESS)
+		*ent = &d->d;
+
 	mutex_unlock(&ree_fs_mutex);
 
 	return res;
@@ -782,7 +1087,6 @@ const struct tee_file_operations ree_fs_ops = {
 	.close = ree_fs_close,
 	.read = ree_fs_read,
 	.write = ree_fs_write,
-	.seek = ree_fs_seek,
 	.truncate = ree_fs_truncate,
 	.rename = ree_fs_rename,
 	.remove = ree_fs_remove,

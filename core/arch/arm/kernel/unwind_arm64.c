@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-2-Clause
 /*-
  * Copyright (c) 2015 Linaro Limited
  * Copyright (c) 2015 The FreeBSD Foundation
@@ -29,56 +30,72 @@
  */
 
 #include <arm.h>
-#include <kernel/unwind.h>
+#include <kernel/linker.h>
 #include <kernel/thread.h>
-#include <string.h>
-#include <trace.h>
+#include <kernel/unwind.h>
+#include <unw/unwind.h>
 
-bool unwind_stack(struct unwind_state *frame)
+#include "unwind_private.h"
+
+#if defined(CFG_CORE_PAUTH)
+void pauth_strip_pac(uint64_t *lr)
 {
-	uint64_t fp;
+	const uint64_t va_mask = GENMASK_64(CFG_LPAE_ADDR_SPACE_BITS - 1, 0);
 
-	fp = frame->fp;
-	if (!thread_addr_is_in_stack(fp))
-		return false;
+	*lr = *lr & va_mask;
+}
+#endif
 
-	frame->sp = fp + 0x10;
-	/* FP to previous frame (X29) */
-	frame->fp = *(uint64_t *)(fp);
-	/* LR (X30) */
-	frame->pc = *(uint64_t *)(fp + 8) - 4;
+vaddr_t *unw_get_kernel_stack(void)
+{
+	size_t n = 0;
+	size_t size = 0;
+	vaddr_t *tmp = NULL;
+	vaddr_t *addr = NULL;
+	uaddr_t stack = thread_stack_start();
+	size_t stack_size = thread_stack_size();
+	struct unwind_state_arm64 state = {
+		.pc = read_pc(),
+		.fp = read_fp()
+	};
 
-	return true;
+	while (unwind_stack_arm64(&state, stack, stack_size)) {
+		tmp = unw_grow(addr, &size, (n + 1) * sizeof(vaddr_t));
+		if (!tmp)
+			goto err;
+		addr = tmp;
+		addr[n] = state.pc;
+		n++;
+	}
+
+	if (addr) {
+		tmp = unw_grow(addr, &size, (n + 1) * sizeof(vaddr_t));
+		if (!tmp)
+			goto err;
+		addr = tmp;
+		addr[n] = 0;
+	}
+
+	return addr;
+err:
+	EMSG("Out of memory");
+	free(addr);
+	return NULL;
 }
 
-#if defined(CFG_CORE_UNWIND) && (TRACE_LEVEL > 0)
-
-void print_stack(int level)
+#if defined(CFG_UNWIND) && (TRACE_LEVEL > 0)
+void print_kernel_stack(void)
 {
-	struct unwind_state state;
+	struct unwind_state_arm64 state = { };
+	vaddr_t stack_start = 0;
+	vaddr_t stack_end = 0;
 
-	memset(&state, 0, sizeof(state));
 	state.pc = read_pc();
 	state.fp = read_fp();
 
-	do {
-		switch (level) {
-		case TRACE_FLOW:
-			FMSG_RAW("pc  0x%016" PRIx64, state.pc);
-			break;
-		case TRACE_DEBUG:
-			DMSG_RAW("pc  0x%016" PRIx64, state.pc);
-			break;
-		case TRACE_INFO:
-			IMSG_RAW("pc  0x%016" PRIx64, state.pc);
-			break;
-		case TRACE_ERROR:
-			EMSG_RAW("pc  0x%016" PRIx64, state.pc);
-			break;
-		default:
-			break;
-		}
-	} while (unwind_stack(&state));
+	trace_printf_helper_raw(TRACE_ERROR, true,
+				"TEE load address @ %#"PRIxVA, VCORE_START_VA);
+	get_stack_hard_limits(&stack_start, &stack_end);
+	print_stack_arm64(&state, stack_start, stack_end - stack_start);
 }
-
-#endif /* defined(CFG_CORE_UNWIND) && (TRACE_LEVEL > 0) */
+#endif

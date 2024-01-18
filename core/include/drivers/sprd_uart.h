@@ -1,5 +1,7 @@
+/* SPDX-License-Identifier: BSD-2-Clause */
 /*
  * Copyright (c) 2016, Spreadtrum Communications Inc.
+ * Copyright (c) 2017, Linaro Limited
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -24,16 +26,18 @@
  * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  * POSSIBILITY OF SUCH DAMAGE.
  */
-#ifndef SPRD_UART_H
-#define SPRD_UART_H
+#ifndef __DRIVERS_SPRD_UART_H
+#define __DRIVERS_SPRD_UART_H
 
 #include <types_ext.h>
+#include <drivers/serial.h>
 
-void sprd_uart_flush(vaddr_t base);
+struct sprd_uart_data {
+	struct io_pa_va base;
+	struct serial_chip chip;
+};
 
-void sprd_uart_putc(vaddr_t base, unsigned char ch);
+void sprd_uart_init(struct sprd_uart_data *pd, paddr_t base);
 
-unsigned char sprd_uart_getc(vaddr_t base);
-
-#endif /* SPRD_UART_H */
+#endif /* __DRIVERS_SPRD_UART_H */
 

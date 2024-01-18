@@ -1,33 +1,13 @@
+/* SPDX-License-Identifier: BSD-2-Clause */
 /*
  * Copyright (c) 2015, Linaro Limited
  * Copyright (c) 2014, STMicroelectronics International N.V.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice,
- * this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- * this list of conditions and the following disclaimer in the documentation
- * and/or other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
  */
 
 #include <tee_syscall_numbers.h>
 #include <asm.S>
+
+	.section .note.GNU-stack,"",%progbits
 
         .section .text
         .balign 4
@@ -35,8 +15,19 @@
 
         .macro UTEE_SYSCALL name, scn, num_args
 	FUNC \name , :
-
         push    {r5-r7,lr}
+UNWIND( .save   {r5-r7,lr})
+#if defined(CFG_SYSCALL_WRAPPERS_MCOUNT) && !defined(__LDELF__)
+	.if \scn != TEE_SCN_RETURN
+	mov	ip, sp
+	push	{r0-r4, fp, ip}
+	add	fp, ip, #16
+	push	{lr}
+	bl	__gnu_mcount_nc
+	pop	{r0-r4, fp, ip}
+	mov	sp, ip
+	.endif
+#endif
         mov     r7, #(\scn)
 	.if \num_args > TEE_SVC_MAX_ARGS
 	.error "Too many arguments for syscall"
@@ -55,4 +46,15 @@
 	END_FUNC \name
         .endm
 
-#include "utee_syscalls_asm.S"
+	FUNC _utee_panic, :
+	push	{r0-r11, lr}
+UNWIND(	.save	{r0-r11, lr})
+	mov	lr, pc
+	push	{lr}
+UNWIND(	.save	{lr})
+	mov	r1, sp
+	bl	__utee_panic
+	/* Not reached */
+	END_FUNC _utee_panic
+
+#include <utee_syscalls_asm.S>

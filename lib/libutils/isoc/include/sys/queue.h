@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: BSD-3-Clause */
 /*	$NetBSD: queue.h,v 1.49.6.1 2008/11/20 03:22:38 snj Exp $	*/
 
 /*
@@ -173,6 +174,11 @@ struct {								\
 #define	LIST_FIRST(head)		((head)->lh_first)
 #define	LIST_NEXT(elm, field)		((elm)->field.le_next)
 
+#define	LIST_FOREACH_SAFE(var, head, field, tvar)			\
+	for ((var) = LIST_FIRST((head));				\
+	    (var) && ((tvar) = LIST_NEXT((var), field), 1);		\
+	    (var) = (tvar))
+
 /*
  * Singly-linked List definitions.
  */
@@ -230,6 +236,11 @@ struct {								\
 
 #define	SLIST_FOREACH(var, head, field)					\
 	for((var) = (head)->slh_first; (var); (var) = (var)->field.sle_next)
+
+#define	SLIST_FOREACH_SAFE(var, head, field, tvar)			\
+	for ((var) = SLIST_FIRST((head));				\
+	    (var) && ((tvar) = SLIST_NEXT((var), field), 1);		\
+	    (var) = (tvar))
 
 /*
  * Singly-linked List access methods.
@@ -299,10 +310,21 @@ struct {								\
 	}								\
 } while (/* CONSTCOND */0)
 
+#define STAILQ_REMOVE_AFTER(head, elm, field) do {			\
+	if ((STAILQ_NEXT(elm, field) =					\
+	     STAILQ_NEXT(STAILQ_NEXT(elm, field), field)) == NULL)	\
+		(head)->stqh_last = &STAILQ_NEXT((elm), field);		\
+} while (0)
+
 #define	STAILQ_FOREACH(var, head, field)				\
 	for ((var) = ((head)->stqh_first);				\
 		(var);							\
 		(var) = ((var)->field.stqe_next))
+
+#define	STAILQ_FOREACH_SAFE(var, head, field, tvar)			\
+	for ((var) = STAILQ_FIRST((head));				\
+		(var) && ((tvar) = STAILQ_NEXT((var), field), 1);	\
+		(var) = (tvar))
 
 #define	STAILQ_CONCAT(head1, head2) do {				\
 	if (!STAILQ_EMPTY((head2))) {					\

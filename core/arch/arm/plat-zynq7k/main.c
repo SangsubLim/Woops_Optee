@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-2-Clause
 /*
  * Copyright (C) 2015 Freescale Semiconductor, Inc.
  * All rights reserved.
@@ -32,10 +33,9 @@
 #include <drivers/cdns_uart.h>
 #include <drivers/gic.h>
 #include <io.h>
-#include <kernel/generic_boot.h>
+#include <kernel/boot.h>
 #include <kernel/misc.h>
 #include <kernel/panic.h>
-#include <kernel/pm_stubs.h>
 #include <kernel/tz_ssvce_pl310.h>
 #include <mm/core_mmu.h>
 #include <mm/core_memprot.h>
@@ -43,116 +43,65 @@
 #include <platform_smc.h>
 #include <stdint.h>
 #include <tee/entry_fast.h>
-#include <tee/entry_std.h>
 
-static void main_fiq(void);
-static void platform_tee_entry_fast(struct thread_smc_args *args);
+static struct cdns_uart_data console_data;
 
-static const struct thread_handlers handlers = {
-	.std_smc = tee_entry_std,
-	.fast_smc = platform_tee_entry_fast,
-	.fiq = main_fiq,
-	.cpu_on = pm_panic,
-	.cpu_off = pm_panic,
-	.cpu_suspend = pm_panic,
-	.cpu_resume = pm_panic,
-	.system_off = pm_panic,
-	.system_reset = pm_panic,
-};
+register_phys_mem_pgdir(MEM_AREA_IO_NSEC, CONSOLE_UART_BASE,
+			CORE_MMU_PGDIR_SIZE);
+register_phys_mem_pgdir(MEM_AREA_IO_SEC, GIC_BASE, CORE_MMU_PGDIR_SIZE);
+register_phys_mem_pgdir(MEM_AREA_IO_SEC, PL310_BASE, CORE_MMU_PGDIR_SIZE);
+register_phys_mem_pgdir(MEM_AREA_IO_SEC, SLCR_BASE, CORE_MMU_PGDIR_SIZE);
 
-static struct gic_data gic_data;
-
-register_phys_mem(MEM_AREA_IO_NSEC, CONSOLE_UART_BASE, CORE_MMU_DEVICE_SIZE);
-register_phys_mem(MEM_AREA_IO_SEC, GIC_BASE, CORE_MMU_DEVICE_SIZE);
-register_phys_mem(MEM_AREA_IO_SEC, PL310_BASE, CORE_MMU_DEVICE_SIZE);
-register_phys_mem(MEM_AREA_IO_SEC, SLCR_BASE, CORE_MMU_DEVICE_SIZE);
-
-const struct thread_handlers *generic_boot_get_handlers(void)
+void plat_primary_init_early(void)
 {
-	return &handlers;
-}
-
-static void main_fiq(void)
-{
-	panic();
-}
-
-void plat_cpu_reset_late(void)
-{
-	if (!get_core_pos()) {
-		/* primary core */
+	/* primary core */
 #if defined(CFG_BOOT_SECONDARY_REQUEST)
-		/* set secondary entry address and release core */
-		write32(CFG_TEE_LOAD_ADDR, SECONDARY_ENTRY_DROP);
-		dsb();
-		sev();
+	/* set secondary entry address and release core */
+	io_write32(SECONDARY_ENTRY_DROP, TEE_LOAD_ADDR);
+	dsb();
+	sev();
 #endif
 
-		/* SCU config */
-		write32(SCU_INV_CTRL_INIT, SCU_BASE + SCU_INV_SEC);
-		write32(SCU_SAC_CTRL_INIT, SCU_BASE + SCU_SAC);
-		write32(SCU_NSAC_CTRL_INIT, SCU_BASE + SCU_NSAC);
+	/* SCU config */
+	io_write32(SCU_BASE + SCU_INV_SEC, SCU_INV_CTRL_INIT);
+	io_write32(SCU_BASE + SCU_SAC, SCU_SAC_CTRL_INIT);
+	io_write32(SCU_BASE + SCU_NSAC, SCU_NSAC_CTRL_INIT);
 
-		/* SCU enable */
-		write32(read32(SCU_BASE + SCU_CTRL) | 0x1,
-			SCU_BASE + SCU_CTRL);
+	/* SCU enable */
+	io_setbits32(SCU_BASE + SCU_CTRL, 0x1);
 
-		/* NS Access control */
-		write32(ACCESS_BITS_ALL, SECURITY2_SDIO0);
-		write32(ACCESS_BITS_ALL, SECURITY3_SDIO1);
-		write32(ACCESS_BITS_ALL, SECURITY4_QSPI);
-		write32(ACCESS_BITS_ALL, SECURITY6_APB_SLAVES);
+	/* NS Access control */
+	io_write32(SECURITY2_SDIO0, ACCESS_BITS_ALL);
+	io_write32(SECURITY3_SDIO1, ACCESS_BITS_ALL);
+	io_write32(SECURITY4_QSPI, ACCESS_BITS_ALL);
+	io_write32(SECURITY6_APB_SLAVES, ACCESS_BITS_ALL);
 
-		write32(SLCR_UNLOCK_MAGIC, SLCR_UNLOCK);
+	io_write32(SLCR_UNLOCK, SLCR_UNLOCK_MAGIC);
 
-		write32(ACCESS_BITS_ALL, SLCR_TZ_DDR_RAM);
-		write32(ACCESS_BITS_ALL, SLCR_TZ_DMA_NS);
-		write32(ACCESS_BITS_ALL, SLCR_TZ_DMA_IRQ_NS);
-		write32(ACCESS_BITS_ALL, SLCR_TZ_DMA_PERIPH_NS);
-		write32(ACCESS_BITS_ALL, SLCR_TZ_GEM);
-		write32(ACCESS_BITS_ALL, SLCR_TZ_SDIO);
-		write32(ACCESS_BITS_ALL, SLCR_TZ_USB);
+	io_write32(SLCR_TZ_DDR_RAM, ACCESS_BITS_ALL);
+	io_write32(SLCR_TZ_DMA_NS, ACCESS_BITS_ALL);
+	io_write32(SLCR_TZ_DMA_IRQ_NS, ACCESS_BITS_ALL);
+	io_write32(SLCR_TZ_DMA_PERIPH_NS, ACCESS_BITS_ALL);
+	io_write32(SLCR_TZ_GEM, ACCESS_BITS_ALL);
+	io_write32(SLCR_TZ_SDIO, ACCESS_BITS_ALL);
+	io_write32(SLCR_TZ_USB, ACCESS_BITS_ALL);
 
-		write32(SLCR_LOCK_MAGIC, SLCR_LOCK);
-	}
-}
-
-static vaddr_t console_base(void)
-{
-	static void *va __early_bss;
-
-	if (cpu_mmu_enabled()) {
-		if (!va)
-			va = phys_to_virt(CONSOLE_UART_BASE,
-					  MEM_AREA_IO_NSEC);
-		return (vaddr_t)va;
-	}
-	return CONSOLE_UART_BASE;
+	io_write32(SLCR_LOCK, SLCR_LOCK_MAGIC);
 }
 
 void console_init(void)
 {
-}
-
-void console_putc(int ch)
-{
-	if (ch == '\n')
-		cdns_uart_putc('\r', console_base());
-	cdns_uart_putc(ch, console_base());
-}
-
-void console_flush(void)
-{
-	cdns_uart_flush(console_base());
+	cdns_uart_init(&console_data, CONSOLE_UART_BASE, 0, 0);
+	register_serial_console(&console_data.chip);
 }
 
 vaddr_t pl310_base(void)
 {
-	static void *va __early_bss;
+	static void *va;
 
 	if (cpu_mmu_enabled()) {
 		if (!va)
-			va = phys_to_virt(PL310_BASE, MEM_AREA_IO_SEC);
+			va = phys_to_virt(PL310_BASE, MEM_AREA_IO_SEC, 1);
 		return (vaddr_t)va;
 	}
 	return PL310_BASE;
@@ -161,19 +110,19 @@ vaddr_t pl310_base(void)
 void arm_cl2_config(vaddr_t pl310_base)
 {
 	/* Disable PL310 */
-	write32(0, pl310_base + PL310_CTRL);
+	io_write32(pl310_base + PL310_CTRL, 0);
 
 	/*
 	 * Xilinx AR#54190 recommends setting L2C RAM in SLCR
 	 * to 0x00020202 for proper cache operations.
 	 */
-	write32(SLCR_L2C_RAM_VALUE, SLCR_L2C_RAM);
+	io_write32(SLCR_L2C_RAM, SLCR_L2C_RAM_VALUE);
 
-	write32(PL310_TAG_RAM_CTRL_INIT, pl310_base + PL310_TAG_RAM_CTRL);
-	write32(PL310_DATA_RAM_CTRL_INIT, pl310_base + PL310_DATA_RAM_CTRL);
-	write32(PL310_AUX_CTRL_INIT, pl310_base + PL310_AUX_CTRL);
-	write32(PL310_PREFETCH_CTRL_INIT, pl310_base + PL310_PREFETCH_CTRL);
-	write32(PL310_POWER_CTRL_INIT, pl310_base + PL310_POWER_CTRL);
+	io_write32(pl310_base + PL310_TAG_RAM_CTRL, PL310_TAG_RAM_CTRL_INIT);
+	io_write32(pl310_base + PL310_DATA_RAM_CTRL, PL310_DATA_RAM_CTRL_INIT);
+	io_write32(pl310_base + PL310_AUX_CTRL, PL310_AUX_CTRL_INIT);
+	io_write32(pl310_base + PL310_PREFETCH_CTRL, PL310_PREFETCH_CTRL_INIT);
+	io_write32(pl310_base + PL310_POWER_CTRL, PL310_POWER_CTRL_INIT);
 
 	/* invalidate all cache ways */
 	arm_cl2_invbyway(pl310_base);
@@ -184,35 +133,22 @@ void arm_cl2_enable(vaddr_t pl310_base)
 	uint32_t val;
 
 	/* Enable PL310 ctrl -> only set lsb bit */
-	write32(1, pl310_base + PL310_CTRL);
+	io_write32(pl310_base + PL310_CTRL, 1);
 
 	/* if L2 FLZW enable, enable in L1 */
-	val = read32(pl310_base + PL310_AUX_CTRL);
+	val = io_read32(pl310_base + PL310_AUX_CTRL);
 	if (val & 1)
 		write_actlr(read_actlr() | (1 << 3));
 }
 
-void main_init_gic(void)
+void boot_primary_init_intc(void)
 {
-	vaddr_t gicc_base;
-	vaddr_t gicd_base;
-
-	gicc_base = (vaddr_t)phys_to_virt(GIC_BASE + GICC_OFFSET,
-					  MEM_AREA_IO_SEC);
-	gicd_base = (vaddr_t)phys_to_virt(GIC_BASE + GICD_OFFSET,
-					  MEM_AREA_IO_SEC);
-
-	if (!gicc_base || !gicd_base)
-		panic();
-
-	/* Initialize GIC */
-	gic_init(&gic_data, gicc_base, gicd_base);
-	itr_init(&gic_data.chip);
+	gic_init(GIC_BASE + GICC_OFFSET, GIC_BASE + GICD_OFFSET);
 }
 
-void main_secondary_init_gic(void)
+void boot_secondary_init_intc(void)
 {
-	gic_cpu_init(&gic_data);
+	gic_init_per_cpu();
 }
 
 static vaddr_t slcr_access_range[] = {
@@ -229,12 +165,14 @@ static uint32_t write_slcr(uint32_t addr, uint32_t val)
 	for (i = 0; i < ARRAY_SIZE(slcr_access_range); i += 2) {
 		if (addr >= slcr_access_range[i] &&
 		    addr <= slcr_access_range[i+1]) {
-			static vaddr_t va __early_bss;
+			static vaddr_t va;
 
 			if (!va)
 				va = (vaddr_t)phys_to_virt(SLCR_BASE,
-							   MEM_AREA_IO_SEC);
-			write32(val, va + addr);
+							   MEM_AREA_IO_SEC,
+							   addr +
+							   sizeof(uint32_t));
+			io_write32(va + addr, val);
 			return OPTEE_SMC_RETURN_OK;
 		}
 	}
@@ -248,19 +186,22 @@ static uint32_t read_slcr(uint32_t addr, uint32_t *val)
 	for (i = 0; i < ARRAY_SIZE(slcr_access_range); i += 2) {
 		if (addr >= slcr_access_range[i] &&
 		    addr <= slcr_access_range[i+1]) {
-			static vaddr_t va __early_bss;
+			static vaddr_t va;
 
 			if (!va)
 				va = (vaddr_t)phys_to_virt(SLCR_BASE,
-							   MEM_AREA_IO_SEC);
-			*val = read32(va + addr);
+							   MEM_AREA_IO_SEC,
+							   addr +
+							   sizeof(uint32_t));
+			*val = io_read32(va + addr);
 			return OPTEE_SMC_RETURN_OK;
 		}
 	}
 	return OPTEE_SMC_RETURN_EBADADDR;
 }
 
-static void platform_tee_entry_fast(struct thread_smc_args *args)
+/* Overriding the default __weak tee_entry_fast() */
+void tee_entry_fast(struct thread_smc_args *args)
 {
 	switch (args->a0) {
 	case ZYNQ7K_SMC_SLCR_WRITE:
@@ -270,7 +211,7 @@ static void platform_tee_entry_fast(struct thread_smc_args *args)
 		args->a0 = read_slcr(args->a1, &args->a2);
 		break;
 	default:
-		tee_entry_fast(args);
+		__tee_entry_fast(args);
 		break;
 	}
 }

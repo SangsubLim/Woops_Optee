@@ -1,35 +1,14 @@
+/* SPDX-License-Identifier: BSD-2-Clause */
 /*
  * Copyright (c) 2014, STMicroelectronics International N.V.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice,
- * this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- * this list of conditions and the following disclaimer in the documentation
- * and/or other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
  */
 #ifndef TRACE_H
 #define TRACE_H
 
+#include <compiler.h>
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stddef.h>
-#include <compiler.h>
 #include <trace_levels.h>
 
 #define MAX_PRINT_SIZE      256
@@ -46,10 +25,15 @@ extern int trace_level;
 extern const char trace_ext_prefix[];
 void trace_ext_puts(const char *str);
 int trace_ext_get_thread_id(void);
+int trace_ext_get_core_id(void);
+int trace_ext_get_guest_id(void);
 void trace_set_level(int level);
 int trace_get_level(void);
+void plat_trace_ext_puts(const char *str);
 
 /* Internal functions used by the macros below */
+void trace_vprintf(const char *func, int line, int level, bool level_ok,
+		   const char *fmt, va_list args) __printf(5, 0);
 void trace_printf(const char *func, int line, int level, bool level_ok,
 		  const char *fmt, ...) __printf(5, 6);
 
@@ -166,38 +150,4 @@ void dhex_dump(const char *function, int line, int level,
 	trace_printf(__func__, __LINE__, TRACE_ERROR, true, __VA_ARGS__)
 
 #endif /* TRACE_LEVEL */
-
-#if defined(__KERNEL__) && defined(CFG_CORE_UNWIND)
-#include <kernel/unwind.h>
-#define _PRINT_STACK
-#endif
-
-#if defined(_PRINT_STACK) && (TRACE_LEVEL >= TRACE_ERROR)
-#define EPRINT_STACK() print_stack(TRACE_ERROR)
-#else
-#define EPRINT_STACK() (void)0
-#endif
-
-#if defined(_PRINT_STACK) && (TRACE_LEVEL >= TRACE_INFO)
-#define IPRINT_STACK() print_stack(TRACE_INFO)
-#else
-#define IPRINT_STACK() (void)0
-#endif
-
-#if defined(_PRINT_STACK) && (TRACE_LEVEL >= TRACE_DEBUG)
-#define DPRINT_STACK() print_stack(TRACE_DEBUG)
-#else
-#define DPRINT_STACK() (void)0
-#endif
-
-#if defined(_PRINT_STACK) && (TRACE_LEVEL >= TRACE_FLOW)
-#define FPRINT_STACK() print_stack(TRACE_FLOW)
-#else
-#define FPRINT_STACK() (void)0
-#endif
-
-#if defined(__KERNEL__) && defined(CFG_CORE_UNWIND)
-#undef _PRINT_STACK
-#endif
-
 #endif /* TRACE_H */

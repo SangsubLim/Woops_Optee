@@ -1,33 +1,12 @@
+// SPDX-License-Identifier: BSD-2-Clause
 /*
  * Copyright (c) 2016, Linaro Limited
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice,
- * this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- * this list of conditions and the following disclaimer in the documentation
- * and/or other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
  */
 
 #include <assert.h>
 #include <drivers/pl061_gpio.h>
 #include <io.h>
+#include <keep.h>
 #include <trace.h>
 #include <util.h>
 
@@ -61,7 +40,8 @@
 
 static vaddr_t pl061_reg_base[MAX_GPIO_DEVICES];
 
-static enum gpio_dir pl061_get_direction(unsigned int gpio_pin)
+static enum gpio_dir pl061_get_direction(struct gpio_chip *chip __unused,
+					 unsigned int gpio_pin)
 {
 	vaddr_t base_addr;
 	uint8_t data;
@@ -71,29 +51,26 @@ static enum gpio_dir pl061_get_direction(unsigned int gpio_pin)
 
 	base_addr = pl061_reg_base[gpio_pin / GPIOS_PER_PL061];
 	offset = gpio_pin % GPIOS_PER_PL061;
-	data = read8(base_addr + GPIODIR);
+	data = io_read8(base_addr + GPIODIR);
 	if (data & BIT(offset))
 		return GPIO_DIR_OUT;
 	return GPIO_DIR_IN;
 }
 
-static void pl061_set_direction(unsigned int gpio_pin, enum gpio_dir direction)
+static void pl061_set_direction(struct gpio_chip *chip __unused,
+				unsigned int gpio_pin, enum gpio_dir direction)
 {
 	vaddr_t base_addr;
-	uint8_t data;
 	unsigned int offset;
 
 	assert(gpio_pin < PLAT_PL061_MAX_GPIOS);
 
 	base_addr = pl061_reg_base[gpio_pin / GPIOS_PER_PL061];
 	offset = gpio_pin % GPIOS_PER_PL061;
-	if (direction == GPIO_DIR_OUT) {
-		data = read8(base_addr + GPIODIR) | BIT(offset);
-		write8(data, base_addr + GPIODIR);
-	} else {
-		data = read8(base_addr + GPIODIR) & ~BIT(offset);
-		write8(data, base_addr + GPIODIR);
-	}
+	if (direction == GPIO_DIR_OUT)
+		io_setbits8(base_addr + GPIODIR, BIT(offset));
+	else
+		io_clrbits8(base_addr + GPIODIR, BIT(offset));
 }
 
 /*
@@ -104,7 +81,8 @@ static void pl061_set_direction(unsigned int gpio_pin, enum gpio_dir direction)
  * to be read, and bits that are 0 in the address mask cause the corresponding
  * bits in GPIODATA to be read as 0, regardless of their value.
  */
-static enum gpio_level pl061_get_value(unsigned int gpio_pin)
+static enum gpio_level pl061_get_value(struct gpio_chip *chip __unused,
+				       unsigned int gpio_pin)
 {
 	vaddr_t base_addr;
 	unsigned int offset;
@@ -113,7 +91,7 @@ static enum gpio_level pl061_get_value(unsigned int gpio_pin)
 
 	base_addr = pl061_reg_base[gpio_pin / GPIOS_PER_PL061];
 	offset = gpio_pin % GPIOS_PER_PL061;
-	if (read8(base_addr + BIT(offset + 2)))
+	if (io_read8(base_addr + BIT(offset + 2)))
 		return GPIO_LEVEL_HIGH;
 	return GPIO_LEVEL_LOW;
 }
@@ -123,7 +101,8 @@ static enum gpio_level pl061_get_value(unsigned int gpio_pin)
  * from the address bus, PADDR[9:2], must be HIGH. Otherwise the bit values
  * remain unchanged by the write.
  */
-static void pl061_set_value(unsigned int gpio_pin, enum gpio_level value)
+static void pl061_set_value(struct gpio_chip *chip __unused,
+			    unsigned int gpio_pin, enum gpio_level value)
 {
 	vaddr_t base_addr;
 	unsigned int offset;
@@ -133,12 +112,13 @@ static void pl061_set_value(unsigned int gpio_pin, enum gpio_level value)
 	base_addr = pl061_reg_base[gpio_pin / GPIOS_PER_PL061];
 	offset = gpio_pin % GPIOS_PER_PL061;
 	if (value == GPIO_LEVEL_HIGH)
-		write8(BIT(offset), base_addr + BIT(offset + 2));
+		io_write8(base_addr + BIT(offset + 2), BIT(offset));
 	else
-		write8(0, base_addr + BIT(offset + 2));
+		io_write8(base_addr + BIT(offset + 2), 0);
 }
 
-static enum gpio_interrupt pl061_get_interrupt(unsigned int gpio_pin)
+static enum gpio_interrupt pl061_get_interrupt(struct gpio_chip *chip __unused,
+					       unsigned int gpio_pin)
 {
 	vaddr_t base_addr;
 	uint8_t data;
@@ -148,30 +128,27 @@ static enum gpio_interrupt pl061_get_interrupt(unsigned int gpio_pin)
 
 	base_addr = pl061_reg_base[gpio_pin / GPIOS_PER_PL061];
 	offset = gpio_pin % GPIOS_PER_PL061;
-	data = read8(base_addr + GPIOIE);
+	data = io_read8(base_addr + GPIOIE);
 	if (data & BIT(offset))
 		return GPIO_INTERRUPT_ENABLE;
 	return GPIO_INTERRUPT_DISABLE;
 }
 
-static void pl061_set_interrupt(unsigned int gpio_pin,
-	enum gpio_interrupt ena_dis)
+static void pl061_set_interrupt(struct gpio_chip *chip __unused,
+				unsigned int gpio_pin,
+				enum gpio_interrupt ena_dis)
 {
 	vaddr_t base_addr;
-	uint8_t data;
 	unsigned int offset;
 
 	assert(gpio_pin < PLAT_PL061_MAX_GPIOS);
 
 	base_addr = pl061_reg_base[gpio_pin / GPIOS_PER_PL061];
 	offset = gpio_pin % GPIOS_PER_PL061;
-	if (ena_dis == GPIO_INTERRUPT_ENABLE) {
-		data = read8(base_addr + GPIOIE) | BIT(offset);
-		write8(data, base_addr + GPIOIE);
-	} else {
-		data = read8(base_addr + GPIOIE) & ~BIT(offset);
-		write8(data, base_addr + GPIOIE);
-	}
+	if (ena_dis == GPIO_INTERRUPT_ENABLE)
+		io_setbits8(base_addr + GPIOIE, BIT(offset));
+	else
+		io_clrbits8(base_addr + GPIOIE, BIT(offset));
 }
 
 /*
@@ -194,6 +171,7 @@ static const struct gpio_ops pl061_ops = {
 	.get_interrupt = pl061_get_interrupt,
 	.set_interrupt = pl061_set_interrupt,
 };
+DECLARE_KEEP_PAGER(pl061_ops);
 
 /*
  * Initialize PL061 GPIO controller
@@ -216,7 +194,7 @@ enum pl061_mode_control pl061_get_mode_control(unsigned int gpio_pin)
 
 	base_addr = pl061_reg_base[gpio_pin / GPIOS_PER_PL061];
 	offset = gpio_pin % GPIOS_PER_PL061;
-	data = read8(base_addr + GPIOAFSEL);
+	data = io_read8(base_addr + GPIOAFSEL);
 	if (data & BIT(offset))
 		return PL061_MC_HW;
 	return PL061_MC_SW;
@@ -226,18 +204,14 @@ void pl061_set_mode_control(unsigned int gpio_pin,
 	enum pl061_mode_control hw_sw)
 {
 	vaddr_t base_addr;
-	uint8_t data;
 	unsigned int offset;
 
 	assert(gpio_pin < PLAT_PL061_MAX_GPIOS);
 
 	base_addr = pl061_reg_base[gpio_pin / GPIOS_PER_PL061];
 	offset = gpio_pin % GPIOS_PER_PL061;
-	if (hw_sw == PL061_MC_HW) {
-		data = read8(base_addr + GPIOAFSEL) | BIT(offset);
-		write8(data, base_addr + GPIOAFSEL);
-	} else {
-		data = read8(base_addr + GPIOAFSEL) & ~BIT(offset);
-		write8(data, base_addr + GPIOAFSEL);
-	}
+	if (hw_sw == PL061_MC_HW)
+		io_setbits8(base_addr + GPIOAFSEL, BIT(offset));
+	else
+		io_clrbits8(base_addr + GPIOAFSEL, BIT(offset));
 }

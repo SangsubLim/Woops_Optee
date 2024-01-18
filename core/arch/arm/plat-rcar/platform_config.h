@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: BSD-2-Clause */
 /*
  * Copyright (c) 2016, GlobalLogic
  * All rights reserved.
@@ -28,14 +29,14 @@
 #ifndef PLATFORM_CONFIG_H
 #define PLATFORM_CONFIG_H
 
-/* Make stacks aligned to data cache line length */
-#define STACK_ALIGNMENT		64
+#include <mm/generic_ram_layout.h>
 
-#ifdef ARM64
-#ifdef CFG_WITH_PAGER
-#error "Pager not supported for ARM64"
-#endif
-#endif /*ARM64*/
+#define RCAR_CACHE_LINE_SZ		64
+
+/* Make stacks aligned to data cache line length */
+#define STACK_ALIGNMENT		RCAR_CACHE_LINE_SZ
+
+#if defined(CFG_RCAR_GEN3)
 
 #define GIC_BASE		0xF1000000
 #define GICC_BASE		0xF1020000
@@ -43,39 +44,69 @@
 
 #define CONSOLE_UART_BASE	0xE6E88000
 
-#define DRAM0_BASE		0x44000000
-#define DRAM0_SIZE		0x04000000
+#define PRR_BASE		0xFFF00000
 
-/* Location of trusted dram */
-#define TZDRAM_BASE		0x44000000
-#define TZDRAM_SIZE		0x03E00000
+#elif defined(CFG_RCAR_GEN4)
 
-#define CFG_TEE_CORE_NB_CORE	8
+#define GICC_BASE		0xF1060000
+#define GICD_BASE		0xF1000000
 
-/* Full GlobalPlatform test suite requires CFG_SHMEM_SIZE to be at least 2MB */
-#define CFG_SHMEM_START		(TZDRAM_BASE + TZDRAM_SIZE)
-#define CFG_SHMEM_SIZE		0x100000
-
-#define CFG_TEE_RAM_VA_SIZE	(1024 * 1024)
-
-#ifndef CFG_TEE_LOAD_ADDR
-#define CFG_TEE_LOAD_ADDR	CFG_TEE_RAM_START
+#if CFG_RCAR_UART == 103	/* SCIF3 */
+#define CONSOLE_UART_BASE	0xE6C50000
+#elif CFG_RCAR_UART == 200	/* HSCIF0 */
+#define CONSOLE_UART_BASE	0xE6540000
 #endif
 
-/*
- * Everything is in TZDRAM.
- * +------------------+
- * |        | TEE_RAM |
- * + TZDRAM +---------+
- * |        | TA_RAM  |
- * +--------+---------+
- */
-#define CFG_TEE_RAM_PH_SIZE	CFG_TEE_RAM_VA_SIZE
-#define CFG_TEE_RAM_START	(TZDRAM_BASE + 0x00100000)
-#define CFG_TA_RAM_START	ROUNDUP((CFG_TEE_RAM_START + \
-					CFG_TEE_RAM_VA_SIZE), \
-					CORE_MMU_DEVICE_SIZE)
-#define CFG_TA_RAM_SIZE		ROUNDDOWN((TZDRAM_SIZE - CFG_TEE_RAM_VA_SIZE), \
-					  CORE_MMU_DEVICE_SIZE)
+#endif	/* CFG_RCAR_GENx */
+
+#if defined(PLATFORM_FLAVOR_salvator_h3)
+#define NSEC_DDR_0_BASE		0x47E00000
+#define NSEC_DDR_0_SIZE		0x38200000
+#define NSEC_DDR_1_BASE		0x500000000U
+#define NSEC_DDR_1_SIZE		0x40000000
+#define NSEC_DDR_2_BASE		0x600000000U
+#define NSEC_DDR_2_SIZE		0x40000000
+#define NSEC_DDR_3_BASE		0x700000000U
+#define NSEC_DDR_3_SIZE		0x40000000
+
+#elif defined(PLATFORM_FLAVOR_salvator_h3_4x2g)
+#define NSEC_DDR_0_BASE		0x47E00000
+#define NSEC_DDR_0_SIZE		0x78200000
+#define NSEC_DDR_1_BASE		0x500000000U
+#define NSEC_DDR_1_SIZE		0x80000000
+#define NSEC_DDR_2_BASE		0x600000000U
+#define NSEC_DDR_2_SIZE		0x80000000
+#define NSEC_DDR_3_BASE		0x700000000U
+#define NSEC_DDR_3_SIZE		0x80000000
+
+#elif defined(PLATFORM_FLAVOR_salvator_m3)
+#define NSEC_DDR_0_BASE		0x47E00000
+#define NSEC_DDR_0_SIZE		0x78200000
+#define NSEC_DDR_1_BASE		0x600000000U
+#define NSEC_DDR_1_SIZE		0x80000000
+
+#elif defined(PLATFORM_FLAVOR_salvator_m3_2x4g)
+#define NSEC_DDR_0_BASE		0x47E00000
+#define NSEC_DDR_0_SIZE		0x78200000
+#define NSEC_DDR_1_BASE		0x480000000U
+#define NSEC_DDR_1_SIZE		0x80000000
+#define NSEC_DDR_2_BASE		0x600000000U
+#define NSEC_DDR_2_SIZE		0x100000000U
+
+#elif defined(PLATFORM_FLAVOR_spider_s4)
+#define NSEC_DDR_0_BASE		0x48000000
+#define NSEC_DDR_0_SIZE		0x78000000
+#define NSEC_DDR_1_BASE		0x480000000U
+#define NSEC_DDR_1_SIZE		0x80000000U
+
+#else
+
+/* Generic DT-based platform */
+
+#endif
+
+/* Full GlobalPlatform test suite requires TEE_SHMEM_SIZE to be at least 2MB */
+#define TEE_SHMEM_START		(TZDRAM_BASE + TZDRAM_SIZE)
+#define TEE_SHMEM_SIZE		0x100000
 
 #endif /*PLATFORM_CONFIG_H*/

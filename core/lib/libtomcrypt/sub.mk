@@ -1,128 +1,155 @@
-CFG_CRYPTO ?= y
-CFG_CRYPTO_SIZE_OPTIMIZATION ?= y
-
-ifeq (y,$(CFG_CRYPTO))
-
-# Ciphers
-CFG_CRYPTO_AES ?= y
-CFG_CRYPTO_DES ?= y
-
-# Cipher block modes
-CFG_CRYPTO_ECB ?= y
-CFG_CRYPTO_CBC ?= y
-CFG_CRYPTO_CTR ?= y
-CFG_CRYPTO_CTS ?= y
-CFG_CRYPTO_XTS ?= y
-
-# Message authentication codes
-CFG_CRYPTO_HMAC ?= y
-CFG_CRYPTO_CMAC ?= y
-CFG_CRYPTO_CBC_MAC ?= y
-
-# Hashes
-CFG_CRYPTO_MD5 ?= y
-CFG_CRYPTO_SHA1 ?= y
-CFG_CRYPTO_SHA224 ?= y
-CFG_CRYPTO_SHA256 ?= y
-CFG_CRYPTO_SHA384 ?= y
-CFG_CRYPTO_SHA512 ?= y
-
-# Asymmetric ciphers
-CFG_CRYPTO_DSA ?= y
-CFG_CRYPTO_RSA ?= y
-CFG_CRYPTO_DH ?= y
-CFG_CRYPTO_ECC ?= y
-
-# Authenticated encryption
-CFG_CRYPTO_CCM ?= y
-CFG_CRYPTO_GCM ?= y
-
-endif
-
-ifeq ($(CFG_WITH_PAGER),y)
-ifneq ($(CFG_CRYPTO_SHA256),y)
-$(warning Warning: Enabling CFG_CRYPTO_SHA256 [required by CFG_WITH_PAGER])
-CFG_CRYPTO_SHA256:=y
-endif
-endif
-
-ifeq ($(CFG_CRYPTO_WITH_CE),y)
-ifeq ($(CFG_ARM32_core),y)
-CFG_CRYPTO_AES_ARM32_CE ?= $(CFG_CRYPTO_AES)
-CFG_CRYPTO_SHA1_ARM32_CE ?= $(CFG_CRYPTO_SHA1)
-CFG_CRYPTO_SHA256_ARM32_CE ?= $(CFG_CRYPTO_SHA256)
-endif
-ifeq ($(CFG_ARM64_core),y)
-CFG_CRYPTO_AES_ARM64_CE ?= $(CFG_CRYPTO_AES)
-CFG_CRYPTO_SHA1_ARM64_CE ?= $(CFG_CRYPTO_SHA1)
-CFG_CRYPTO_SHA256_ARM64_CE ?= $(CFG_CRYPTO_SHA256)
-endif
-endif
-
-# Cryptographic extensions can only be used safely when OP-TEE knows how to
-# preserve the VFP context
-ifeq ($(CFG_CRYPTO_SHA256_ARM32_CE),y)
-$(call force,CFG_WITH_VFP,y,required by CFG_CRYPTO_SHA256_ARM32_CE)
-endif
-ifeq ($(CFG_CRYPTO_SHA256_ARM64_CE),y)
-$(call force,CFG_WITH_VFP,y,required by CFG_CRYPTO_SHA256_ARM64_CE)
-endif
-ifeq ($(CFG_CRYPTO_SHA1_ARM32_CE),y)
-$(call force,CFG_WITH_VFP,y,required by CFG_CRYPTO_SHA1_ARM32_CE)
-endif
-ifeq ($(CFG_CRYPTO_SHA1_ARM64_CE),y)
-$(call force,CFG_WITH_VFP,y,required by CFG_CRYPTO_SHA1_ARM64_CE)
-endif
-ifeq ($(CFG_CRYPTO_AES_ARM64_CE),y)
-$(call force,CFG_WITH_VFP,y,required by CFG_CRYPTO_AES_ARM64_CE)
-endif
-
-cryp-enable-all-depends = $(call cfg-enable-all-depends,$(strip $(1)),$(foreach v,$(2),CFG_CRYPTO_$(v)))
-$(eval $(call cryp-enable-all-depends,CFG_REE_FS, AES ECB CTR HMAC SHA256 GCM))
-$(eval $(call cryp-enable-all-depends,CFG_SQL_FS, AES ECB CTR HMAC SHA256 GCM))
-$(eval $(call cryp-enable-all-depends,CFG_RPMB_FS, AES ECB CTR HMAC SHA256 GCM))
-
-# Dependency checks: warn and disable some features if dependencies are not met
-
-cryp-dep-one = $(call cfg-depends-one,CFG_CRYPTO_$(strip $(1)),$(patsubst %, CFG_CRYPTO_%,$(strip $(2))))
-cryp-dep-all = $(call cfg-depends-all,CFG_CRYPTO_$(strip $(1)),$(patsubst %, CFG_CRYPTO_%,$(strip $(2))))
-
-$(eval $(call cryp-dep-one, ECB, AES DES))
-$(eval $(call cryp-dep-one, CBC, AES DES))
-$(eval $(call cryp-dep-one, CTR, AES))
-# CTS is implemented with ECB and CBC
-$(eval $(call cryp-dep-all, CTS, AES ECB CBC))
-$(eval $(call cryp-dep-one, XTS, AES))
-$(eval $(call cryp-dep-one, HMAC, AES DES))
-$(eval $(call cryp-dep-one, HMAC, MD5 SHA1 SHA224 SHA256 SHA384 SHA512))
-$(eval $(call cryp-dep-one, CMAC, AES))
-$(eval $(call cryp-dep-one, CBC_MAC, AES DES))
-$(eval $(call cryp-dep-one, CCM, AES))
-$(eval $(call cryp-dep-one, GCM, AES))
-# If no AES cipher mode is left, disable AES
-$(eval $(call cryp-dep-one, AES, ECB CBC CTR CTS XTS))
-# If no DES cipher mode is left, disable DES
-$(eval $(call cryp-dep-one, DES, ECB CBC))
-
-# dsa_make_params() needs all three SHA-2 algorithms.
-# Disable DSA if any is missing.
-$(eval $(call cryp-dep-all, DSA, SHA256 SHA384 SHA512))
-
-cryp-one-enabled = $(call cfg-one-enabled,$(foreach v,$(1),CFG_CRYPTO_$(v)))
-cryp-all-enabled = $(call cfg-all-enabled,$(foreach v,$(1),CFG_CRYPTO_$(v)))
-
-_CFG_CRYPTO_WITH_ACIPHER := $(call cryp-one-enabled, RSA DSA DH ECC)
-_CFG_CRYPTO_WITH_AUTHENC := $(and $(filter y,$(CFG_CRYPTO_AES)), $(call cryp-one-enabled, CCM GCM))
-_CFG_CRYPTO_WITH_CIPHER := $(call cryp-one-enabled, AES DES)
-_CFG_CRYPTO_WITH_HASH := $(call cryp-one-enabled, MD5 SHA1 SHA224 SHA256 SHA384 SHA512)
-_CFG_CRYPTO_WITH_MAC := $(call cryp-one-enabled, HMAC CMAC CBC_MAC)
-_CFG_CRYPTO_WITH_CBC := $(call cryp-one-enabled, CBC CBC_MAC)
-_CFG_CRYPTO_WITH_ASN1 := $(call cryp-one-enabled, RSA DSA ECC)
-_CFG_CRYPTO_WITH_FORTUNA_PRNG := $(call cryp-all-enabled, AES SHA256)
-
-cppflags-lib-$(CFG_CRYPTO_SIZE_OPTIMIZATION) += -DLTC_SMALL_CODE
-cflags-lib-$(CFG_CRYPTO_SIZE_OPTIMIZATION) += -Os
-
 global-incdirs-y += include
+global-incdirs-y += src/headers
+
+cflags-lib-y += -Wno-declaration-after-statement
+
+cppflags-lib-y += -DARGTYPE=4  # Make LTC_ARGCHK() return on error
+cppflags-lib-y += -DLTC_NO_TEST -DLTC_NO_PROTOTYPES
+cppflags-lib-y += -DLTC_NO_TABLES -DLTC_HASH_HELPERS
+cppflags-lib-y += -DLTC_NO_MISC
+cppflags-lib-y += -DLTC_HMAC
+cppflags-lib-$(_CFG_CORE_LTC_SIZE_OPTIMIZATION) += -DLTC_SMALL_CODE
+
+cppflags-lib-y += -DLTC_NO_CIPHERS
+
+ifeq ($(_CFG_CORE_LTC_AES_DESC),y)
+	cppflags-lib-y += -DLTC_RIJNDAEL
+endif
+ifeq ($(_CFG_CORE_LTC_DES),y)
+	cppflags-lib-y += -DLTC_DES
+endif
+
+cppflags-lib-y += -DLTC_NO_MODES
+
+ifeq ($(_CFG_CORE_LTC_ECB),y)
+	cppflags-lib-y += -DLTC_ECB_MODE
+endif
+ifeq ($(_CFG_CORE_LTC_CBC),y)
+	cppflags-lib-y += -DLTC_CBC_MODE
+endif
+ifeq ($(_CFG_CORE_LTC_CTR),y)
+	cppflags-lib-y += -DLTC_CTR_MODE
+endif
+ifeq ($(_CFG_CORE_LTC_XTS),y)
+	cppflags-lib-y += -DLTC_XTS_MODE
+endif
+
+cppflags-lib-y += -DLTC_NO_HASHES
+
+ifeq ($(_CFG_CORE_LTC_MD5_DESC),y)
+	cppflags-lib-y += -DLTC_MD5
+endif
+ifeq ($(_CFG_CORE_LTC_SHA1_DESC),y)
+	cppflags-lib-y += -DLTC_SHA1
+endif
+ifeq ($(_CFG_CORE_LTC_SHA224_DESC),y)
+	cppflags-lib-y += -DLTC_SHA224
+endif
+ifeq ($(_CFG_CORE_LTC_SHA256_DESC),y)
+	cppflags-lib-y += -DLTC_SHA256
+endif
+ifeq ($(_CFG_CORE_LTC_SHA384_DESC),y)
+	cppflags-lib-y += -DLTC_SHA384
+endif
+ifeq ($(_CFG_CORE_LTC_SHA512_DESC),y)
+	cppflags-lib-y += -DLTC_SHA512
+endif
+ifeq ($(_CFG_CORE_LTC_SHA512_256),y)
+	cppflags-lib-y += -DLTC_SHA512_256
+endif
+cppflags-lib-$(_CFG_CORE_LTC_SHA3_DESC) += -DLTC_SHA3
+
+
+cppflags-lib-y += -DLTC_NO_MACS
+
+ifeq ($(_CFG_CORE_LTC_HMAC),y)
+	cppflags-lib-y += -DLTC_HMAC
+endif
+ifeq ($(_CFG_CORE_LTC_CMAC),y)
+	cppflags-lib-y += -DLTC_OMAC
+endif
+ifeq ($(_CFG_CORE_LTC_CCM),y)
+	cppflags-lib-y += -DLTC_CCM_MODE
+endif
+ifeq ($(_CFG_CORE_LTC_GCM),y)
+	cppflags-lib-y += -DLTC_GCM_MODE
+endif
+
+cppflags-lib-y += -DLTC_NO_PK
+
+ifeq ($(_CFG_CORE_LTC_RSA),y)
+   cppflags-lib-y += -DLTC_MRSA
+endif
+ifeq ($(_CFG_CORE_LTC_DSA),y)
+   cppflags-lib-y += -DLTC_MDSA
+endif
+ifeq ($(_CFG_CORE_LTC_DH),y)
+   cppflags-lib-y += -DLTC_MDH
+endif
+ifeq ($(_CFG_CORE_LTC_ECC),y)
+   cppflags-lib-y += -DLTC_MECC
+
+   # use Shamir's trick for point mul (speeds up signature verification)
+   cppflags-lib-y += -DLTC_ECC_SHAMIR
+
+   cppflags-lib-y += -DLTC_ECC192
+   cppflags-lib-y += -DLTC_ECC224
+   cppflags-lib-y += -DLTC_ECC256
+   cppflags-lib-y += -DLTC_ECC384
+   cppflags-lib-y += -DLTC_ECC521
+   cppflags-lib-y += -DLTC_CURVE25519
+
+   # ECC 521 bits is the max supported key size
+   cppflags-lib-y += -DLTC_MAX_ECC=521
+endif
+ifneq (,$(filter y,$(_CFG_CORE_LTC_SM2_DSA) $(_CFG_CORE_LTC_SM2_PKE)))
+   cppflags-lib-y += -DLTC_ECC_SM2
+endif
+
+cppflags-lib-$(_CFG_CORE_LTC_X25519) += -DLTC_CURVE25519
+cppflags-lib-$(_CFG_CORE_LTC_ED25519) += -DLTC_CURVE25519
+
+cppflags-lib-y += -DLTC_NO_PRNGS -DLTC_FORTUNA
+
+cflags-lib-$(_CFG_CORE_LTC_SIZE_OPTIMIZATION) += -Os
 
 subdirs-y += src
+
+srcs-$(_CFG_CORE_LTC_HASH) += hash.c
+srcs-$(_CFG_CORE_LTC_HMAC) += hmac.c
+srcs-$(_CFG_CORE_LTC_CMAC) += cmac.c
+srcs-$(_CFG_CORE_LTC_ECB) += ecb.c
+srcs-$(_CFG_CORE_LTC_CBC) += cbc.c
+srcs-$(_CFG_CORE_LTC_CTR) += ctr.c
+srcs-$(_CFG_CORE_LTC_XTS) += xts.c
+srcs-$(_CFG_CORE_LTC_CCM) += ccm.c
+srcs-$(_CFG_CORE_LTC_GCM) += gcm.c
+srcs-$(_CFG_CORE_LTC_DSA) += dsa.c
+srcs-$(_CFG_CORE_LTC_ECC) += ecc.c
+srcs-$(_CFG_CORE_LTC_RSA) += rsa.c
+srcs-$(_CFG_CORE_LTC_DH) += dh.c
+srcs-$(_CFG_CORE_LTC_AES) += aes.c
+srcs-$(_CFG_CORE_LTC_AES_ACCEL) += aes_accel.c
+srcs-$(_CFG_CORE_LTC_SHA1_ACCEL) += sha1_accel.c
+ifeq ($(_CFG_CORE_LTC_SHA256_DESC),y)
+srcs-$(_CFG_CORE_LTC_SHA256_ACCEL) += sha256_accel.c
+endif
+ifeq ($(_CFG_CORE_LTC_SHA512_DESC),y)
+srcs-$(_CFG_CORE_LTC_SHA512_ACCEL) += sha512_accel.c
+endif
+ifeq ($(_CFG_CORE_LTC_SHA3_DESC),y)
+srcs-y += shake.c
+srcs-$(_CFG_CORE_LTC_SHA3_ACCEL) += sha3_accel.c
+endif
+srcs-$(_CFG_CORE_LTC_SM2_DSA) += sm2-dsa.c
+srcs-$(_CFG_CORE_LTC_SM2_PKE) += sm2-pke.c
+srcs-$(_CFG_CORE_LTC_SM2_KEP) += sm2-kep.c
+srcs-$(_CFG_CORE_LTC_X25519) += x25519.c
+srcs-$(_CFG_CORE_LTC_ED25519) += ed25519.c
+ifeq ($(_CFG_CORE_LTC_ACIPHER),y)
+srcs-y += mpi_desc.c
+cppflags-mpi_desc.c-y += -DMBEDTLS_ALLOW_PRIVATE_ACCESS
+endif
+
+srcs-y += tomcrypt.c
+

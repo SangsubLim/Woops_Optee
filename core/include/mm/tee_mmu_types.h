@@ -1,70 +1,85 @@
+/* SPDX-License-Identifier: BSD-2-Clause */
 /*
  * Copyright (c) 2014, STMicroelectronics International N.V.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice,
- * this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- * this list of conditions and the following disclaimer in the documentation
- * and/or other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
+ * Copyright (c) 2021, Linaro Limited
+ * Copyright (c) 2022, Arm Limited.
  */
-#ifndef TEE_MMU_TYPES_H
-#define TEE_MMU_TYPES_H
+#ifndef __MM_TEE_MMU_TYPES_H
+#define __MM_TEE_MMU_TYPES_H
 
 #include <stdint.h>
+#include <sys/queue.h>
+#include <util.h>
 
-#define TEE_MATTR_VALID_BLOCK		(1 << 0)
-#define TEE_MATTR_HIDDEN_BLOCK		(1 << 1)
-#define TEE_MATTR_HIDDEN_DIRTY_BLOCK	(1 << 2)
-#define	TEE_MATTR_TABLE			(1 << 3)
-#define	TEE_MATTR_PR			(1 << 4)
-#define	TEE_MATTR_PW			(1 << 5)
-#define	TEE_MATTR_PX			(1 << 6)
-#define	TEE_MATTR_PRW			(TEE_MATTR_PR | TEE_MATTR_PW)
-#define	TEE_MATTR_PRX			(TEE_MATTR_PR | TEE_MATTR_PX)
-#define	TEE_MATTR_PRWX			(TEE_MATTR_PRW | TEE_MATTR_PX)
-#define	TEE_MATTR_UR			(1 << 7)
-#define	TEE_MATTR_UW			(1 << 8)
-#define	TEE_MATTR_UX			(1 << 9)
-#define	TEE_MATTR_URW			(TEE_MATTR_UR | TEE_MATTR_UW)
-#define	TEE_MATTR_URX			(TEE_MATTR_UR | TEE_MATTR_UX)
-#define	TEE_MATTR_URWX			(TEE_MATTR_URW | TEE_MATTR_UX)
+#define TEE_MATTR_VALID_BLOCK		BIT(0)
+#define TEE_MATTR_TABLE			BIT(3)
+#define TEE_MATTR_PR			BIT(4)
+#define TEE_MATTR_PW			BIT(5)
+#define TEE_MATTR_PX			BIT(6)
+#define TEE_MATTR_PRW			(TEE_MATTR_PR | TEE_MATTR_PW)
+#define TEE_MATTR_PRX			(TEE_MATTR_PR | TEE_MATTR_PX)
+#define TEE_MATTR_PRWX			(TEE_MATTR_PRW | TEE_MATTR_PX)
+#define TEE_MATTR_UR			BIT(7)
+#define TEE_MATTR_UW			BIT(8)
+#define TEE_MATTR_UX			BIT(9)
+#define TEE_MATTR_URW			(TEE_MATTR_UR | TEE_MATTR_UW)
+#define TEE_MATTR_URX			(TEE_MATTR_UR | TEE_MATTR_UX)
+#define TEE_MATTR_URWX			(TEE_MATTR_URW | TEE_MATTR_UX)
+#define TEE_MATTR_PROT_MASK	\
+		(TEE_MATTR_PRWX | TEE_MATTR_URWX | TEE_MATTR_GUARDED)
 
-#define TEE_MATTR_GLOBAL		(1 << 10)
-#define	TEE_MATTR_SECURE		(1 << 11)
+#define TEE_MATTR_GLOBAL		BIT(10)
+#define TEE_MATTR_SECURE		BIT(11)
 
-#define TEE_MATTR_CACHE_MASK	0x7
-#define TEE_MATTR_CACHE_SHIFT	12
-/* These are shifted TEE_MATTR_CACHE_SHIFT */
-#define TEE_MATTR_CACHE_NONCACHE 0
-#define TEE_MATTR_CACHE_CACHED	1
+#define TEE_MATTR_MEM_TYPE_MASK	U(0x7)
+#define TEE_MATTR_MEM_TYPE_SHIFT	U(12)
+/* These are shifted TEE_MATTR_MEM_TYPE_SHIFT */
 
-#define TEE_MATTR_LOCKED		(1 << 15)
+/*
+ * Device-nGnRnE most restrictive (equivalent to Strongly Ordered memory
+ * in the ARMv7 architecture).
+ * https://developer.arm.com/documentation/den0024/a/Memory-Ordering/Memory-types/Device-memory
+ *
+ * If an ARMv7 architecture operating system runs on a Cortex-A53 processor,
+ * the Device memory type matches the nGnRE encoding and the Strongly-Ordered
+ * memory type matches the nGnRnE memory type.
+ * https://developer.arm.com/documentation/den0024/a/Memory-Ordering/Memory-types/Device-memory
+ */
+#define TEE_MATTR_MEM_TYPE_DEV	        U(0) /* Device-nGnRE */
+#define TEE_MATTR_MEM_TYPE_CACHED	U(1)
+#define TEE_MATTR_MEM_TYPE_STRONGLY_O	U(2) /* Device-nGnRnE  */
+#define TEE_MATTR_MEM_TYPE_TAGGED	U(3)
 
-#define TEE_MMU_UMAP_STACK_IDX	0
-#define TEE_MMU_UMAP_CODE_IDX	1
-#define TEE_MMU_UMAP_NUM_CODE_SEGMENTS	3
+#define TEE_MATTR_GUARDED		BIT(15)
 
-#define TEE_MMU_UMAP_PARAM_IDX		(TEE_MMU_UMAP_CODE_IDX + \
-					 TEE_MMU_UMAP_NUM_CODE_SEGMENTS)
-#define TEE_MMU_UMAP_MAX_ENTRIES	(TEE_MMU_UMAP_PARAM_IDX + \
-					 TEE_NUM_PARAMS)
+/*
+ * Tags TA mappings which are only used during a single call (open session
+ * or invoke command parameters).
+ */
+#define VM_FLAG_EPHEMERAL		BIT(0)
+/*
+ * Tags TA mappings that must not be removed (kernel mappings while in user
+ * mode).
+ */
+#define VM_FLAG_PERMANENT		BIT(1)
+/* Tags TA mappings that may be shared with other TAs. */
+#define VM_FLAG_SHAREABLE		BIT(2)
+/* Tags temporary mappings added to load the ldelf binary */
+#define VM_FLAG_LDELF			BIT(3)
+/*
+ * The mapping should only be mapped read-only, not enforced by the vm_*
+ * functions.
+ */
+#define VM_FLAG_READONLY		BIT(4)
+
+/*
+ * Set of flags used by tee_mmu_is_vbuf_inside_ta_private() and
+ * tee_mmu_is_vbuf_intersect_ta_private() to tell if a certain region is
+ * mapping TA internal memory or not.
+ */
+#define VM_FLAGS_NONPRIV		(VM_FLAG_EPHEMERAL | \
+					 VM_FLAG_PERMANENT | \
+					 VM_FLAG_SHAREABLE)
 
 struct tee_mmap_region {
 	unsigned int type; /* enum teecore_memtypes */
@@ -75,18 +90,62 @@ struct tee_mmap_region {
 	uint32_t attr; /* TEE_MATTR_* above */
 };
 
-struct tee_ta_region {
+struct vm_region {
 	struct mobj *mobj;
 	size_t offset;
 	vaddr_t va;
 	size_t size;
-	uint32_t attr; /* TEE_MATTR_* above */
+	uint16_t attr; /* TEE_MATTR_* above */
+	uint16_t flags; /* VM_FLAGS_* above */
+	TAILQ_ENTRY(vm_region) link;
 };
 
-struct tee_mmu_info {
-	struct tee_ta_region regions[TEE_MMU_UMAP_MAX_ENTRIES];
-	vaddr_t ta_private_vmem_start;
-	vaddr_t ta_private_vmem_end;
+enum vm_paged_region_type {
+	PAGED_REGION_TYPE_RO,
+	PAGED_REGION_TYPE_RW,
+	PAGED_REGION_TYPE_LOCK,
 };
 
+struct vm_paged_region {
+	struct fobj *fobj;
+	size_t fobj_pgoffs;
+	enum vm_paged_region_type type;
+	uint32_t flags;
+	vaddr_t base;
+	size_t size;
+	struct pgt **pgt_array;
+	TAILQ_ENTRY(vm_paged_region) link;
+	TAILQ_ENTRY(vm_paged_region) fobj_link;
+};
+
+TAILQ_HEAD(vm_paged_region_head, vm_paged_region);
+TAILQ_HEAD(vm_region_head, vm_region);
+
+struct vm_info {
+	struct vm_region_head regions;
+	unsigned int asid;
+};
+
+static inline void mattr_perm_to_str(char *str, size_t size, uint32_t attr)
+{
+	if (size < 7)
+		return;
+
+	str[0] = (attr & TEE_MATTR_UR) ? 'r' : '-';
+	str[1] = (attr & TEE_MATTR_UW) ? 'w' : '-';
+	str[2] = (attr & TEE_MATTR_UX) ? 'x' : '-';
+	str[3] = (attr & TEE_MATTR_PR) ? 'R' : '-';
+	str[4] = (attr & TEE_MATTR_PW) ? 'W' : '-';
+	str[5] = (attr & TEE_MATTR_PX) ? 'X' : '-';
+	str[6] = '\0';
+}
+
+static inline bool mattr_is_cached(uint32_t mattr)
+{
+	uint32_t mem_type = (mattr >> TEE_MATTR_MEM_TYPE_SHIFT) &
+			    TEE_MATTR_MEM_TYPE_MASK;
+
+	return mem_type == TEE_MATTR_MEM_TYPE_CACHED ||
+	       mem_type == TEE_MATTR_MEM_TYPE_TAGGED;
+}
 #endif

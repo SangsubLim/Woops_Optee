@@ -1,32 +1,10 @@
+/* SPDX-License-Identifier: BSD-2-Clause */
 /*
  * Copyright (c) 2015, Linaro Limited
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice,
- * this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- * this list of conditions and the following disclaimer in the documentation
- * and/or other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
  */
 
-#ifndef KERNEL_VFP_H
-#define KERNEL_VFP_H
+#ifndef __KERNEL_VFP_H
+#define __KERNEL_VFP_H
 
 #include <types_ext.h>
 #include <compiler.h>
@@ -39,7 +17,7 @@
  * - FPEXC (32 bits)
  */
 
-#define VFP_NUM_REGS	32
+#define VFP_NUM_REGS	U(32)
 
 struct vfp_reg {
 	uint64_t v;
@@ -61,7 +39,7 @@ struct vfp_state {
  * - CPACR_EL1.FPEN (2 bits)
  */
 
-#define VFP_NUM_REGS	32
+#define VFP_NUM_REGS	U(32)
 
 struct vfp_reg {
 	uint8_t v[16];
@@ -72,7 +50,6 @@ struct vfp_state {
 	uint32_t fpsr;
 	uint32_t fpcr;
 	uint32_t cpacr_el1;
-	bool force_save; /* Save to reg even if VFP was not enabled */
 };
 #endif
 
@@ -109,11 +86,13 @@ void vfp_lazy_save_state_init(struct vfp_state *state);
 /*
  * vfp_lazy_save_state_final() - Saves rest of VFP state
  * @state:	VFP state to save to
+ * @force_save:	Forces saving of state regardless of previous state if true.
  *
- * If VFP was enabled when vfp_lazy_save_state_init() was called: save rest
- * of state and disable VFP. Otherwise, do nothing.
+ * If VFP was enabled when vfp_lazy_save_state_init() was called or
+ * @force_save is true: save rest of state and disable VFP. Otherwise, do
+ * nothing.
  */
-void vfp_lazy_save_state_final(struct vfp_state *state);
+void vfp_lazy_save_state_final(struct vfp_state *state, bool force_save);
 
 /*
  * vfp_lazy_restore_state() - Lazy restore VFP state
@@ -124,4 +103,4 @@ void vfp_lazy_save_state_final(struct vfp_state *state);
  */
 void vfp_lazy_restore_state(struct vfp_state *state, bool full_state);
 
-#endif /*KERNEL_VFP_H*/
+#endif /*__KERNEL_VFP_H*/

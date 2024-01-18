@@ -1,32 +1,12 @@
+/* SPDX-License-Identifier: BSD-2-Clause */
 /*
  * Copyright (c) 2015, Linaro Limited
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice,
- * this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- * this list of conditions and the following disclaimer in the documentation
- * and/or other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
  */
 
 #ifndef PLATFORM_CONFIG_H
 #define PLATFORM_CONFIG_H
+
+#include <mm/generic_ram_layout.h>
 
 /* Make stacks aligned to data cache line length */
 #define STACK_ALIGNMENT		64
@@ -55,51 +35,79 @@
 #define DRAM0_BASE		0x40000000
 #define DRAM0_SIZE		0x80000000
 
-/* Location of trusted dram */
-#define TZDRAM_BASE		0xBE000000
-#define TZDRAM_SIZE		0x02000000
+#elif defined(PLATFORM_FLAVOR_mt8175)
 
-#define CFG_TEE_CORE_NB_CORE	4
+#define GIC_BASE		0x0C000000
+#define GICC_OFFSET		0x400000
+#define GICD_OFFSET		0x0
 
-/* Full GlobalPlatform test suite requires CFG_SHMEM_SIZE to be at least 2MB */
-#define CFG_SHMEM_START		(TZDRAM_BASE - 0x200000)
-#define CFG_SHMEM_SIZE		0x200000
+#define UART0_BASE		0x11002000
+#define UART1_BASE		0x11103000
+#define UART2_BASE		0x11104000
+
+#define CONSOLE_UART_BASE	UART0_BASE
+#define CONSOLE_BAUDRATE	921600
+#define CONSOLE_UART_CLK_IN_HZ	26000000
+
+#elif defined(PLATFORM_FLAVOR_mt8516)
+
+#define GIC_BASE		0x10310000
+#define GICC_OFFSET		0x10000
+#define GICD_OFFSET		0x00000
+
+#define UART0_BASE		0x11005000
+#define UART1_BASE		0x11106000
+#define UART2_BASE		0x11107000
+
+#define CONSOLE_UART_BASE	UART0_BASE
+#define CONSOLE_BAUDRATE	921600
+#define CONSOLE_UART_CLK_IN_HZ	26000000
+
+#elif defined(PLATFORM_FLAVOR_mt8183)
+
+#define GIC_BASE		0x0C000000
+#define GICC_OFFSET		0x400000
+#define GICD_OFFSET		0x0
+
+#define UART0_BASE		0x11002000
+#define UART1_BASE		0x11103000
+#define UART2_BASE		0x11104000
+
+#define CONSOLE_UART_BASE	UART0_BASE
+#define CONSOLE_BAUDRATE	921600
+#define CONSOLE_UART_CLK_IN_HZ	26000000
+
+#elif defined(PLATFORM_FLAVOR_mt8195)
+
+#define GIC_BASE		0x0C000000
+#define GICC_OFFSET		0x400000
+#define GICD_OFFSET		0x0
+
+#define UART0_BASE		0x11001100
+#define UART1_BASE		0x11101200
+#define UART2_BASE		0x11101300
+
+#define CONSOLE_UART_BASE	UART0_BASE
+#define CONSOLE_BAUDRATE	921600
+#define CONSOLE_UART_CLK_IN_HZ	26000000
+
+#elif defined(PLATFORM_FLAVOR_mt8188)
+
+#define GIC_BASE		0x0C000000
+#define GICC_OFFSET		0x400000
+#define GICD_OFFSET		0x0
+
+#define UART0_BASE		0x11001100
+#define UART1_BASE		0x11101200
+#define UART2_BASE		0x11101300
+
+#define CONSOLE_UART_BASE	UART0_BASE
+#define CONSOLE_BAUDRATE	115200
+#define CONSOLE_UART_CLK_IN_HZ	26000000
 
 #else
 #error "Unknown platform flavor"
 #endif
-
-#define CFG_TEE_RAM_VA_SIZE	(1024 * 1024)
-
-#ifndef CFG_TEE_LOAD_ADDR
-#define CFG_TEE_LOAD_ADDR	CFG_TEE_RAM_START
-#endif
-
-/*
- * Everything is in TZDRAM.
- * +------------------+
- * |        | TEE_RAM |
- * + TZDRAM +---------+
- * |        | TA_RAM  |
- * +--------+---------+
- */
-#define CFG_TEE_RAM_PH_SIZE	CFG_TEE_RAM_VA_SIZE
-#define CFG_TEE_RAM_START	TZDRAM_BASE
-#define CFG_TA_RAM_START	ROUNDUP((TZDRAM_BASE + CFG_TEE_RAM_VA_SIZE), \
-					CORE_MMU_DEVICE_SIZE)
-#define CFG_TA_RAM_SIZE		ROUNDDOWN((TZDRAM_SIZE - CFG_TEE_RAM_VA_SIZE), \
-					  CORE_MMU_DEVICE_SIZE)
-
-#define DEVICE0_PA_BASE		ROUNDDOWN(CONSOLE_UART_BASE, \
-					  CORE_MMU_DEVICE_SIZE)
-#define DEVICE0_VA_BASE		DEVICE0_PA_BASE
-#define DEVICE0_SIZE		CORE_MMU_DEVICE_SIZE
-#define DEVICE0_TYPE		MEM_AREA_IO_NSEC
-
-#define DEVICE1_PA_BASE		ROUNDDOWN(GIC_BASE, CORE_MMU_DEVICE_SIZE)
-#define DEVICE1_VA_BASE		DEVICE1_PA_BASE
-#define DEVICE1_SIZE		CORE_MMU_DEVICE_SIZE
-#define DEVICE1_TYPE		MEM_AREA_IO_SEC
 
 #ifdef CFG_WITH_LPAE
 #define MAX_XLAT_TABLES		5

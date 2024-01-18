@@ -1,5 +1,7 @@
+/* SPDX-License-Identifier: BSD-2-Clause */
 /*
  * Copyright (c) 2016, GlobalLogic
+ * Copyright (c) 2017, Linaro Limited
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -24,17 +26,19 @@
  * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  * POSSIBILITY OF SUCH DAMAGE.
  */
-#ifndef SCIF_H
-#define SCIF_H
+#ifndef __DRIVERS_SCIF_H
+#define __DRIVERS_SCIF_H
 
 #include <types_ext.h>
+#include <drivers/serial.h>
 
 #define SCIF_REG_SIZE	0x1000
 
-void scif_uart_flush(vaddr_t base);
+struct scif_uart_data {
+	struct io_pa_va base;
+	struct serial_chip chip;
+};
 
-void scif_uart_init(vaddr_t base);
+void scif_uart_init(struct scif_uart_data *pd, paddr_t base);
 
-void scif_uart_putc(int ch, vaddr_t base);
-
-#endif /* SCIF */
+#endif /* __DRIVERS_SCIF_H */

@@ -1,9 +1,4 @@
 global-incdirs-y += .
-srcs-y += entry.S
 srcs-y += main.c
-srcs-y += rng_support.c
-srcs-y += platform.c
-srcs-y += smp_boot.S
-srcs-y += smp_fixup.S
-srcs-y += head.c
-srcs-y += console.c
+srcs-$(CFG_ARM32_core) += plat_init.S
+srcs-$(CFG_ARM32_core) += psci.c

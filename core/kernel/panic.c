@@ -1,34 +1,64 @@
+// SPDX-License-Identifier: BSD-2-Clause
 /*
  * Copyright (c) 2016, Linaro Limited
  * Copyright (c) 2014, STMicroelectronics International N.V.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice,
- * this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- * this list of conditions and the following disclaimer in the documentation
- * and/or other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
  */
 
+#include <initcall.h>
+#include <kernel/interrupt.h>
+#include <kernel/misc.h>
 #include <kernel/panic.h>
 #include <kernel/thread.h>
+#include <kernel/unwind.h>
 #include <trace.h>
+
+/* SGI number chosen to halt other cores must be in the secure SGI range */
+static_assert(!IS_ENABLED(CFG_HALT_CORES_ON_PANIC) ||
+	      (CFG_HALT_CORES_ON_PANIC_SGI >= 8 &&
+	       CFG_HALT_CORES_ON_PANIC_SGI < 16));
+
+static enum itr_return __noreturn
+multi_core_panic_it_handler(struct itr_handler *hdl __unused)
+{
+	IMSG("Halting CPU %zu", get_core_pos());
+
+	while (true)
+		cpu_idle();
+}
+
+static struct itr_handler multi_core_panic_handler = {
+	.it = CFG_HALT_CORES_ON_PANIC_SGI,
+	.handler = multi_core_panic_it_handler,
+};
+DECLARE_KEEP_PAGER(multi_core_panic_handler);
+
+static void notify_other_cores(void)
+{
+	struct itr_chip *chip = interrupt_get_main_chip_may_fail();
+
+	if (chip)
+		interrupt_raise_sgi(chip, CFG_HALT_CORES_ON_PANIC_SGI,
+				    ITR_CPU_MASK_TO_OTHER_CPUS);
+	else
+		EMSG("Can't notify other cores, main interrupt chip not set");
+}
+
+static TEE_Result init_multi_core_panic_handler(void)
+{
+	if (!IS_ENABLED(CFG_HALT_CORES_ON_PANIC) || CFG_TEE_CORE_NB_CORE == 1)
+		return TEE_SUCCESS;
+
+	if (interrupt_add_handler_with_chip(interrupt_get_main_chip(),
+					    &multi_core_panic_handler))
+		panic();
+
+	interrupt_enable(interrupt_get_main_chip(),
+			 multi_core_panic_handler.it);
+
+	return TEE_SUCCESS;
+}
+
+boot_final(init_multi_core_panic_handler);
 
 void __do_panic(const char *file __maybe_unused,
 		const int line __maybe_unused,
@@ -37,8 +67,6 @@ void __do_panic(const char *file __maybe_unused,
 {
 	/* disable prehemption */
 	(void)thread_mask_exceptions(THREAD_EXCP_ALL);
-
-	/* TODO: notify other cores */
 
 	/* trace: Panic ['panic-string-message' ]at FILE:LINE [<FUNCTION>]" */
 	if (!file && !func && !msg)
@@ -49,8 +77,16 @@ void __do_panic(const char *file __maybe_unused,
 			 file ? file : "?", file ? line : 0,
 			 func ? "<" : "", func ? func : "", func ? ">" : "");
 
-	EPRINT_STACK();
+	print_kernel_stack();
+
+	if (IS_ENABLED(CFG_HALT_CORES_ON_PANIC) && CFG_TEE_CORE_NB_CORE > 1)
+		notify_other_cores();
+
 	/* abort current execution */
 	while (1)
-		;
+		cpu_idle();
+}
+
+void __weak cpu_idle(void)
+{
 }

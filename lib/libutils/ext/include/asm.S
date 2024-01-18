@@ -1,46 +1,83 @@
+/* SPDX-License-Identifier: BSD-2-Clause */
 /*
  * Copyright (c) 2014, STMicroelectronics International N.V.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice,
- * this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- * this list of conditions and the following disclaimer in the documentation
- * and/or other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
+ * Copyright (c) 2020, Linaro Limited
  */
 
-	.macro FUNC name colon
+#if defined(__aarch64__)
+#include <arm64_bti.S>
+#elif defined(__riscv)
+#include <riscv.S>
+#endif
+
+#if defined(__aarch64__) && ((defined(__KERNEL__) && defined(CFG_CORE_BTI)) || \
+			     (!defined(__KERNEL__) && defined(CFG_TA_BTI)))
+#define BTI(...) __VA_ARGS__
+#else
+#define BTI(...)
+#endif
+
+#if defined(CFG_UNWIND) && defined(__arm__)
+#define UNWIND(...) __VA_ARGS__
+#else
+#define UNWIND(...)
+#endif
+
+	.macro FUNC name colon section=default align=4 _bti=default
+	.ifc	\section\(),default
+	.section .text.\name
+	.else
+	.section \section , "ax" , %progbits
+	.endif
 	.global \name
-	.func \name
 	.type \name , %function
+	.balign \align
 	\name \colon
+UNWIND(	.fnstart)
+	.ifc	\_bti\(),default
+BTI(	bti	c)
+	.endif
+	.endm
+
+	.macro LOCAL_FUNC name colon section=default align=4 _bti=default
+	.ifc	\section\(),default
+	.section .text.\name
+	.else
+	.section \section , "ax" , %progbits
+	.endif
+	.type \name , %function
+	.balign \align
+	\name \colon
+UNWIND(	.fnstart)
+	.ifc	\_bti\(),default
+BTI(	bti	c)
+	.endif
+	.endm
+
+	.macro WEAK_FUNC name colon section=default align=4 _bti=default
+	.ifc	\section\(),default
+	.section .text.\name
+	.else
+	.section \section , "ax" , %progbits
+	.endif
+	.weak \name
+	.type \name , %function
+	.balign \align
+	\name \colon
+UNWIND(	.fnstart)
+	.ifc	\_bti\(),default
+BTI(	bti	c)
+	.endif
+	.endm
+
+	.macro END_FUNC name
+UNWIND(	.fnend)
+	.size \name , .-\name
 	.endm
 
 	.macro DATA name colon
 	.global \name
 	.type \name , %object
-	\name \colon
-	.endm
-
-	.macro LOCAL_FUNC name colon
-	.func \name
-	.type \name , %function
 	\name \colon
 	.endm
 
@@ -51,9 +88,4 @@
 
 	.macro END_DATA name
 	.size \name , .-\name
-	.endm
-
-	.macro END_FUNC name
-	.size \name , .-\name
-	.endfunc
 	.endm

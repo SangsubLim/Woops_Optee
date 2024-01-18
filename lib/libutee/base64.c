@@ -1,46 +1,25 @@
+// SPDX-License-Identifier: BSD-2-Clause
 /*
+ * Copyright (c) 2020, Linaro Limited
  * Copyright (c) 2014, STMicroelectronics International N.V.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice,
- * this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- * this list of conditions and the following disclaimer in the documentation
- * and/or other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
  */
 #include "base64.h"
 
 static const char base64_table[] =
 	"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
-size_t base64_enc_len(size_t size)
+size_t _base64_enc_len(size_t size)
 {
 	return 4 * ((size + 2) / 3) + 1;
 }
 
-bool base64_enc(const void *data, size_t dlen, char *buf, size_t *blen)
+bool _base64_enc(const void *data, size_t dlen, char *buf, size_t *blen)
 {
-	size_t n;
+	size_t n = 0;
 	size_t boffs = 0;
-	const char *d = data;
+	const unsigned char *d = data;
 
-	n = base64_enc_len(dlen);
+	n = _base64_enc_len(dlen);
 	if (*blen < n) {
 		*blen = n;
 		return false;
@@ -80,7 +59,7 @@ bool base64_enc(const void *data, size_t dlen, char *buf, size_t *blen)
 
 static bool get_idx(char ch, uint8_t *idx)
 {
-	size_t n;
+	size_t n = 0;
 
 	for (n = 0; base64_table[n] != '\0'; n++) {
 		if (ch == base64_table[n]) {
@@ -91,13 +70,15 @@ static bool get_idx(char ch, uint8_t *idx)
 	return false;
 }
 
-bool base64_dec(const char *data, size_t size, void *buf, size_t *blen)
+bool _base64_dec(const char *data, size_t size, void *buf, size_t *blen)
 {
-	size_t n;
-	uint8_t idx;
+	bool ret = false;
+	size_t n = 0;
+	uint8_t idx = 0;
 	uint8_t *b = buf;
 	size_t m = 0;
 	size_t s = 0;
+	uint8_t byte = 0;
 
 	for (n = 0; n < size && data[n] != '\0'; n++) {
 		if (data[n] == '=')
@@ -106,38 +87,28 @@ bool base64_dec(const char *data, size_t size, void *buf, size_t *blen)
 		if (!get_idx(data[n], &idx))
 			continue;
 
-		if (m > *blen)
-			b = NULL;
-
 		switch (s) {
 		case 0:
-			if (b)
-				b[m] = idx << 2;
+			byte = idx << 2;
 			s++;
 			break;
 		case 1:
-			if (b)
-				b[m] |= idx >> 4;
+			if (b && m < *blen)
+				b[m] = byte | (idx >> 4);
 			m++;
-			if (m > *blen)
-				b = NULL;
-			if (b)
-				b[m] = (idx & 0xf) << 4;
+			byte = (idx & 0xf) << 4;
 			s++;
 			break;
 		case 2:
-			if (b)
-				b[m] |= idx >> 2;
+			if (b && m < *blen)
+				b[m] = byte | (idx >> 2);
 			m++;
-			if (m > *blen)
-				b = NULL;
-			if (b)
-				b[m] = (idx & 0x3) << 6;
+			byte = (idx & 0x3) << 6;
 			s++;
 			break;
 		case 3:
-			if (b)
-				b[m] |= idx;
+			if (b && m < *blen)
+				b[m] = byte | idx;
 			m++;
 			s = 0;
 			break;
@@ -145,10 +116,13 @@ bool base64_dec(const char *data, size_t size, void *buf, size_t *blen)
 			return false;	/* "Can't happen" */
 		}
 	}
-	/* We don't detect if input was bad, but that's OK with the spec. */
+
+	/*
+	 * We don't detect if input was bad, but that's OK with the spec.
+	 * We expect that each fully extracted byte is stored in output buffer.
+	 */
+	ret = (!m && !*blen) || (b && (m <= *blen));
 	*blen = m;
-	if (b)
-		return true;
-	else
-		return false;
+
+	return ret;
 }

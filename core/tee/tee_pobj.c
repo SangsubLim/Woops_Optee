@@ -1,28 +1,6 @@
+// SPDX-License-Identifier: BSD-2-Clause
 /*
  * Copyright (c) 2014, STMicroelectronics International N.V.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice,
- * this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- * this list of conditions and the following disclaimer in the documentation
- * and/or other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
  */
 
 #include <kernel/mutex.h>
@@ -34,6 +12,26 @@
 static TAILQ_HEAD(tee_pobjs, tee_pobj) tee_pobjs =
 		TAILQ_HEAD_INITIALIZER(tee_pobjs);
 static struct mutex pobjs_mutex = MUTEX_INITIALIZER;
+static struct mutex pobjs_usage_mutex = MUTEX_INITIALIZER;
+
+static bool pobj_need_usage_lock(struct tee_pobj *obj)
+{
+	/* Only lock if we don't have exclusive access to the object */
+	return obj->flags & (TEE_DATA_FLAG_SHARE_WRITE |
+			     TEE_DATA_FLAG_SHARE_READ);
+}
+
+void tee_pobj_lock_usage(struct tee_pobj *obj)
+{
+	if (pobj_need_usage_lock(obj))
+		mutex_lock(&pobjs_usage_mutex);
+}
+
+void tee_pobj_unlock_usage(struct tee_pobj *obj)
+{
+	if (pobj_need_usage_lock(obj))
+		mutex_unlock(&pobjs_usage_mutex);
+}
 
 static TEE_Result tee_pobj_check_access(uint32_t oflags, uint32_t nflags)
 {
@@ -80,11 +78,12 @@ static TEE_Result tee_pobj_check_access(uint32_t oflags, uint32_t nflags)
 }
 
 TEE_Result tee_pobj_get(TEE_UUID *uuid, void *obj_id, uint32_t obj_id_len,
-			uint32_t flags, const struct tee_file_operations *fops,
+			uint32_t flags, enum tee_pobj_usage usage,
+			const struct tee_file_operations *fops,
 			struct tee_pobj **obj)
 {
-	struct tee_pobj *o;
-	TEE_Result res;
+	TEE_Result res = TEE_SUCCESS;
+	struct tee_pobj *o = NULL;
 
 	*obj = NULL;
 
@@ -100,16 +99,23 @@ TEE_Result tee_pobj_get(TEE_UUID *uuid, void *obj_id, uint32_t obj_id_len,
 	}
 
 	if (*obj) {
+		if (usage == TEE_POBJ_USAGE_ENUM) {
+			(*obj)->refcnt++;
+			goto out;
+		}
+		if ((*obj)->creating || (usage == TEE_POBJ_USAGE_CREATE &&
+					 !(flags & TEE_DATA_FLAG_OVERWRITE))) {
+			res = TEE_ERROR_ACCESS_CONFLICT;
+			goto out;
+		}
 		res = tee_pobj_check_access((*obj)->flags, flags);
-		if (res != TEE_SUCCESS)
-			*obj = NULL;
-		else
+		if (res == TEE_SUCCESS)
 			(*obj)->refcnt++;
 		goto out;
 	}
 
 	/* new file */
-	o = calloc(sizeof(struct tee_pobj), 1);
+	o = calloc(1, sizeof(struct tee_pobj));
 	if (!o) {
 		res = TEE_ERROR_OUT_OF_MEMORY;
 		goto out;
@@ -119,6 +125,11 @@ TEE_Result tee_pobj_get(TEE_UUID *uuid, void *obj_id, uint32_t obj_id_len,
 	memcpy(&o->uuid, uuid, sizeof(TEE_UUID));
 	o->flags = flags;
 	o->fops = fops;
+
+	if (usage == TEE_POBJ_USAGE_CREATE) {
+		o->temporary = true;
+		o->creating = true;
+	}
 
 	o->obj_id = malloc(obj_id_len);
 	if (o->obj_id == NULL) {
@@ -134,8 +145,18 @@ TEE_Result tee_pobj_get(TEE_UUID *uuid, void *obj_id, uint32_t obj_id_len,
 
 	res = TEE_SUCCESS;
 out:
+	if (res != TEE_SUCCESS)
+		*obj = NULL;
 	mutex_unlock(&pobjs_mutex);
 	return res;
+}
+
+void tee_pobj_create_final(struct tee_pobj *po)
+{
+	mutex_lock(&pobjs_mutex);
+	po->temporary = false;
+	po->creating = false;
+	mutex_unlock(&pobjs_mutex);
 }
 
 TEE_Result tee_pobj_release(struct tee_pobj *obj)

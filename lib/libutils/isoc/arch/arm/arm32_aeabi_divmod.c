@@ -1,28 +1,6 @@
+// SPDX-License-Identifier: BSD-2-Clause
 /*
  * Copyright (c) 2014, STMicroelectronics International N.V.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice,
- * this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- * this list of conditions and the following disclaimer in the documentation
- * and/or other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
  */
 
 /*
@@ -39,6 +17,8 @@
  *     unsigned denominator);
  */
 
+#include <compiler.h>
+
 /* struct qr - stores qutient/remainder to handle divmod EABI interfaces. */
 struct qr {
 	unsigned q;		/* computed quotient */
@@ -54,13 +34,11 @@ static void uint_div_qr(unsigned numerator, unsigned denominator,
 unsigned __aeabi_uidivmod(unsigned numerator, unsigned denominator);
 
 unsigned __aeabi_uidiv(unsigned numerator, unsigned denominator);
-unsigned __aeabi_uimod(unsigned numerator, unsigned denominator);
 
 /* returns in R0 and R1 by tail calling an asm function */
 signed __aeabi_idivmod(signed numerator, signed denominator);
 
 signed __aeabi_idiv(signed numerator, signed denominator);
-signed __aeabi_imod(signed numerator, signed denominator);
 
 /*
  * __ste_idivmod_ret_t __aeabi_idivmod(signed numerator, signed denominator)
@@ -127,16 +105,7 @@ unsigned __aeabi_uidiv(unsigned numerator, unsigned denominator)
 	return qr.q;
 }
 
-unsigned __aeabi_uimod(unsigned numerator, unsigned denominator)
-{
-	struct qr qr = { .q_n = 0, .r_n = 0 };
-
-	uint_div_qr(numerator, denominator, &qr);
-
-	return qr.r;
-}
-
-unsigned __aeabi_uidivmod(unsigned numerator, unsigned denominator)
+unsigned __no_stackprot __aeabi_uidivmod(unsigned numerator, unsigned denominator)
 {
 	struct qr qr = { .q_n = 0, .r_n = 0 };
 
@@ -164,42 +133,7 @@ signed __aeabi_idiv(signed numerator, signed denominator)
 	return qr.q;
 }
 
-signed __aeabi_imod(signed numerator, signed denominator)
-{
-	signed s;
-	signed i;
-	signed j;
-	signed h;
-
-	struct qr qr = { .q_n = 0, .r_n = 0 };
-
-	/* in case modulo of a power of 2 */
-	for (i = 0, j = 0, h = 0, s = denominator; (s != 0) || (h > 1); i++) {
-		if (s & 1) {
-			j = i;
-			h++;
-		}
-		s = s >> 1;
-	}
-	if (h == 1)
-		return numerator >> j;
-
-	if (((numerator < 0) && (denominator > 0)) ||
-	    ((numerator > 0) && (denominator < 0)))
-		qr.q_n = 1;	/* quotient shall be negate */
-	if (numerator < 0) {
-		numerator = -numerator;
-		qr.r_n = 1;	/* remainder shall be negate */
-	}
-	if (denominator < 0)
-		denominator = -denominator;
-
-	uint_div_qr(numerator, denominator, &qr);
-
-	return qr.r;
-}
-
-signed __aeabi_idivmod(signed numerator, signed denominator)
+signed __no_stackprot __aeabi_idivmod(signed numerator, signed denominator)
 {
 	struct qr qr = { .q_n = 0, .r_n = 0 };
 

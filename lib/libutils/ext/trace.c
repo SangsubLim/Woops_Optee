@@ -1,42 +1,25 @@
+// SPDX-License-Identifier: BSD-2-Clause
 /*
  * Copyright (c) 2014, STMicroelectronics International N.V.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice,
- * this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- * this list of conditions and the following disclaimer in the documentation
- * and/or other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
  */
 
+#if defined(__KERNEL__)
+#include <platform_config.h>
+#endif
+
+#include <config.h>
 #include <printk.h>
 #include <stdarg.h>
 #include <string.h>
 #include <trace.h>
-#include <util.h>
 #include <types_ext.h>
-
-#if (TRACE_LEVEL > 0)
+#include <util.h>
 
 #if (TRACE_LEVEL < TRACE_MIN) || (TRACE_LEVEL > TRACE_MAX)
 #error "Invalid value of TRACE_LEVEL"
 #endif
+
+#if (TRACE_LEVEL >= TRACE_ERROR)
 
 void trace_set_level(int level)
 {
@@ -51,15 +34,20 @@ int trace_get_level(void)
 	return trace_level;
 }
 
-static const char *trace_level_to_string(int level, bool level_ok)
+static char trace_level_to_string(int level, bool level_ok)
 {
-	static const char lvl_strs[][9] = {
-		"UNKNOWN:", "ERROR:  ", "INFO:   ", "DEBUG:  ",
-		"FLOW:   " };
+	/*
+	 * U = Unused
+	 * E = Error
+	 * I = Information
+	 * D = Debug
+	 * F = Flow
+	 */
+	static const char lvl_strs[] = { 'U', 'E', 'I', 'D', 'F' };
 	int l = 0;
 
 	if (!level_ok)
-		return "MESSAGE:";
+		return 'M';
 
 	if ((level >= TRACE_MIN) && (level <= TRACE_MAX))
 		l = level;
@@ -67,63 +55,134 @@ static const char *trace_level_to_string(int level, bool level_ok)
 	return lvl_strs[l];
 }
 
+static int print_thread_id(char *buf, size_t bs)
+{
+#if CFG_NUM_THREADS > 100
+	int num_thread_digits = 3;
+#elif CFG_NUM_THREADS > 10
+	int num_thread_digits = 2;
+#else
+	int num_thread_digits = 1;
+#endif
+	int thread_id = trace_ext_get_thread_id();
+
+	if (thread_id >= 0)
+		return snprintk(buf, bs, "%0*d ", num_thread_digits, thread_id);
+	else
+		return snprintk(buf, bs, "%*s ", num_thread_digits, "");
+}
+
+#if defined(__KERNEL__)
+static int print_core_id(char *buf, size_t bs)
+{
+#if CFG_TEE_CORE_NB_CORE > 100
+	const int num_digits = 3;
+	const char qm[] = "???";
+#elif CFG_TEE_CORE_NB_CORE > 10
+	const int num_digits = 2;
+	const char qm[] = "??";
+#else
+	const int num_digits = 1;
+	const char qm[] = "?";
+#endif
+	int core_id = trace_ext_get_core_id();
+
+	if (core_id >= 0)
+		return snprintk(buf, bs, "%0*u ", num_digits, core_id);
+	else
+		return snprintk(buf, bs, "%s ", qm);
+}
+
+static int print_guest_id(char *buf, size_t bs)
+{
+	if (IS_ENABLED(CFG_NS_VIRTUALIZATION))
+		return snprintk(buf, bs, "%d ", trace_ext_get_guest_id());
+	else
+		return 0;
+
+
+}
+#else  /* defined(__KERNEL__) */
+static int print_core_id(char *buf __unused, size_t bs __unused)
+{
+	return 0;
+}
+
+static int print_guest_id(char *buf __unused, size_t bs __unused)
+{
+	return 0;
+}
+#endif
+
 /* Format trace of user ta. Inline with kernel ta */
 void trace_printf(const char *function, int line, int level, bool level_ok,
 		  const char *fmt, ...)
 {
 	va_list ap;
+
+	va_start(ap, fmt);
+	trace_vprintf(function, line, level, level_ok, fmt, ap);
+	va_end(ap);
+}
+void trace_vprintf(const char *function, int line, int level, bool level_ok,
+		   const char *fmt, va_list ap)
+{
 	char buf[MAX_PRINT_SIZE];
 	size_t boffs = 0;
 	int res;
-	int thread_id;
 
 	if (level_ok && level > trace_level)
 		return;
 
-	res = snprintk(buf, sizeof(buf), "%s ",
+	/* Print the type of message */
+	res = snprintk(buf, sizeof(buf), "%c/",
 		       trace_level_to_string(level, level_ok));
 	if (res < 0)
 		return;
 	boffs += res;
 
-	if (level_ok && level < CFG_MSG_LONG_PREFIX_THRESHOLD)
-		thread_id = -1;
-	else
-		thread_id = trace_ext_get_thread_id();
-
-	if (thread_id >= 0) {
-		res = snprintk(buf + boffs, sizeof(buf) - boffs, "[0x%x] ",
-			       thread_id);
-		if (res < 0)
-			return;
-		boffs += res;
-	}
-
+	/* Print the location, i.e., TEE core or TA */
 	res = snprintk(buf + boffs, sizeof(buf) - boffs, "%s:",
 		       trace_ext_prefix);
 	if (res < 0)
 		return;
 	boffs += res;
 
-	if (level_ok && level < CFG_MSG_LONG_PREFIX_THRESHOLD)
-		function = NULL;
-
-	if (function) {
-		res = snprintk(buf + boffs, sizeof(buf) - boffs, "%s:%d:",
-			       function, line);
+	if (level_ok && (BIT(level) & CFG_MSG_LONG_PREFIX_MASK)) {
+		/* Print the current guest ID or 0 for Nexus */
+		res = print_guest_id(buf + boffs, sizeof(buf) - boffs);
 		if (res < 0)
 			return;
 		boffs += res;
+
+		/* Print the core ID if in atomic context  */
+		res = print_core_id(buf + boffs, sizeof(buf) - boffs);
+		if (res < 0)
+			return;
+		boffs += res;
+
+		/* Print the Thread ID */
+		res = print_thread_id(buf + boffs, sizeof(buf) - boffs);
+		if (res < 0)
+			return;
+		boffs += res;
+
+		if (function) {
+			res = snprintk(buf + boffs, sizeof(buf) - boffs, "%s:%d ",
+				       function, line);
+			if (res < 0)
+				return;
+			boffs += res;
+		}
+	} else {
+		/* Add space after location info */
+		if (boffs >= sizeof(buf) - 1)
+		    return;
+		buf[boffs++] = ' ';
+		buf[boffs] = 0;
 	}
 
-	res = snprintk(buf + boffs, sizeof(buf) - boffs, " ");
-	if (res < 0)
-		return;
-	boffs += res;
-
-	va_start(ap, fmt);
 	res = vsnprintk(buf + boffs, sizeof(buf) - boffs, fmt, ap);
-	va_end(ap);
 	if (res > 0)
 		boffs += res;
 
@@ -193,8 +252,6 @@ static int __printf(2, 3) append(struct strbuf *sbuf, const char *fmt, ...)
 	sbuf->ptr += MIN(left, len);
 	return 1;
 }
-
-#define PRIxVA_WIDTH ((int)(sizeof(vaddr_t)*2))
 
 void dhex_dump(const char *function, int line, int level,
 	       const void *buf, int len)

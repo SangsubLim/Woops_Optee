@@ -1,32 +1,37 @@
+/* SPDX-License-Identifier: BSD-2-Clause */
 /*
- * Copyright (c) 2014, Linaro Limited
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice,
- * this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- * this list of conditions and the following disclaimer in the documentation
- * and/or other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
+ * Copyright (c) 2014-2021, Linaro Limited
+ * Copyright (c) 2021, SumUp Services GmbH
  */
 
 #ifndef TEE_API_DEFINES_EXTENSIONS_H
 #define TEE_API_DEFINES_EXTENSIONS_H
+
+/*
+ * RSA signatures with MD5 hash
+ * Values prefixed with vendor ID bit31 with by TEE bitfields IDs
+ */
+#define TEE_ALG_RSASSA_PKCS1_PSS_MGF1_MD5       0xF0111930
+#define TEE_ALG_RSAES_PKCS1_OAEP_MGF1_MD5       0xF0110230
+
+/*
+ * API extended result codes as per TEE_Result IDs defined in GPD TEE
+ * Internal Core API specification v1.1:
+ *
+ * 0x70000000 - 0x7FFFFFFF: Reserved for implementation-specific return
+ *			    code providing non-error information
+ * 0x80000000 - 0x8FFFFFFF: Reserved for implementation-specific errors
+ *
+ * TEE_ERROR_DEFER_DRIVER_INIT - Device driver failed to initialize because
+ * the driver depends on a device not yet initialized.
+ */
+#define TEE_ERROR_DEFER_DRIVER_INIT	0x80000000
+
+/*
+ * TEE_ERROR_NODE_DISABLED - Device driver failed to initialize because it is
+ * not allocated for TEE environment.
+ */
+#define TEE_ERROR_NODE_DISABLED		0x80000001
 
 /*
  * HMAC-based Extract-and-Expand Key Derivation Function (HKDF)
@@ -42,8 +47,12 @@
 #define TEE_TYPE_HKDF_IKM               0xA10000C0
 
 #define TEE_ATTR_HKDF_IKM               0xC00001C0
-#define TEE_ATTR_HKDF_SALT              0xD00002C0
-#define TEE_ATTR_HKDF_INFO              0xD00003C0
+/*
+ * There is a name clash with the  official attributes TEE_ATTR_HKDF_SALT
+ * and TEE_ATTR_HKDF_INFO so define these alternative ID.
+ */
+#define __OPTEE_TEE_ATTR_HKDF_SALT      0xD00002C0
+#define __OPTEE_ATTR_HKDF_INFO          0xD00003C0
 #define TEE_ATTR_HKDF_OKM_LENGTH        0xF00004C0
 
 /*
@@ -79,6 +88,22 @@
 #define TEE_ATTR_PBKDF2_DKM_LENGTH          0xF00004C2
 
 /*
+ * PKCS#1 v1.5 RSASSA pre-hashed sign/verify
+ */
+
+#define TEE_ALG_RSASSA_PKCS1_V1_5	0xF0000830
+
+/*
+ *  TDEA CMAC (NIST SP800-38B)
+ */
+#define TEE_ALG_DES3_CMAC	0xF0000613
+
+/*
+ *  SM4-XTS
+ */
+#define TEE_ALG_SM4_XTS 0xF0000414
+
+/*
  * Implementation-specific object storage constants
  */
 
@@ -86,8 +111,8 @@
 #define TEE_STORAGE_PRIVATE_REE	 0x80000000
 /* Storage is the Replay Protected Memory Block partition of an eMMC device */
 #define TEE_STORAGE_PRIVATE_RPMB 0x80000100
-/* Storage is provided by a SQLite database in the normal world filesystem */
-#define TEE_STORAGE_PRIVATE_SQL  0x80000200
+/* Was TEE_STORAGE_PRIVATE_SQL, which isn't supported any longer */
+#define TEE_STORAGE_PRIVATE_SQL_RESERVED  0x80000200
 
 /*
  * Extension of "Memory Access Rights Constants"
@@ -104,5 +129,12 @@
  */
 #define TEE_MEMORY_ACCESS_NONSECURE          0x10000000
 #define TEE_MEMORY_ACCESS_SECURE             0x20000000
+
+/*
+ * Implementation-specific login types
+ */
+
+/* Private login method for REE kernel clients */
+#define TEE_LOGIN_REE_KERNEL		0x80000000
 
 #endif /* TEE_API_DEFINES_EXTENSIONS_H */

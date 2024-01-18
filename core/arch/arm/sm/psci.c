@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-2-Clause
 /*
  * Copyright (C) 2016 Freescale Semiconductor, Inc.
  * All rights reserved.
@@ -28,7 +29,7 @@
  */
 
 #include <console.h>
-#include <kernel/generic_boot.h>
+#include <kernel/boot.h>
 #include <kernel/thread.h>
 #include <stdint.h>
 #include <sm/optee_smc.h>
@@ -38,12 +39,13 @@
 
 __weak uint32_t psci_version(void)
 {
-	return PSCI_VERSION_0_2;
+	return PSCI_VERSION_1_1;
 }
 
 __weak int psci_cpu_suspend(uint32_t power_state __unused,
 			    uintptr_t entry __unused,
-			    uint32_t context_id __unused)
+			    uint32_t context_id __unused,
+			    struct sm_nsec_ctx *nsec __unused)
 {
 	return PSCI_RET_NOT_SUPPORTED;
 }
@@ -93,8 +95,32 @@ __weak int psci_features(uint32_t psci_fid __unused)
 	return PSCI_RET_NOT_SUPPORTED;
 }
 
+__weak int psci_mem_protect(uint32_t enable __unused)
+{
+	return PSCI_RET_NOT_SUPPORTED;
+}
+
+__weak int psci_mem_chk_range(paddr_t base __unused,
+			      size_t length __unused)
+{
+	return PSCI_RET_NOT_SUPPORTED;
+}
+
+__weak int psci_system_reset2(uint32_t reset_type __unused,
+			      uint32_t cookie __unused)
+{
+	return PSCI_RET_NOT_SUPPORTED;
+}
+
 __weak int psci_node_hw_state(uint32_t cpu_id __unused,
 			      uint32_t power_level __unused)
+{
+	return PSCI_RET_NOT_SUPPORTED;
+}
+
+__weak int psci_system_suspend(uintptr_t entry __unused,
+			       uint32_t context_id __unused,
+			       struct sm_nsec_ctx *nsec __unused)
 {
 	return PSCI_RET_NOT_SUPPORTED;
 }
@@ -111,7 +137,7 @@ __weak int psci_stat_count(uint32_t cpu_id __unused,
 	return PSCI_RET_NOT_SUPPORTED;
 }
 
-void tee_psci_handler(struct thread_smc_args *args)
+void tee_psci_handler(struct thread_smc_args *args, struct sm_nsec_ctx *nsec)
 {
 	uint32_t smc_fid = args->a0;
 	uint32_t a1 = args->a1;
@@ -123,7 +149,7 @@ void tee_psci_handler(struct thread_smc_args *args)
 		args->a0 = psci_version();
 		break;
 	case PSCI_CPU_SUSPEND:
-		args->a0 = psci_cpu_suspend(a1, a2, a3);
+		args->a0 = psci_cpu_suspend(a1, a2, a3, nsec);
 		break;
 	case PSCI_CPU_OFF:
 		args->a0 = psci_cpu_off();
@@ -149,15 +175,27 @@ void tee_psci_handler(struct thread_smc_args *args)
 			;
 		break;
 	case PSCI_SYSTEM_RESET:
-		psci_system_off();
+		psci_system_reset();
 		while (1)
 			;
 		break;
 	case PSCI_PSCI_FEATURES:
 		args->a0 = psci_features(a1);
 		break;
+	case PSCI_SYSTEM_RESET2:
+		args->a0 = psci_system_reset2(a1, a2);
+		break;
+	case PSCI_MEM_PROTECT:
+		args->a0 = psci_mem_protect(a1);
+		break;
+	case PSCI_MEM_PROTECT_CHECK_RANGE:
+		args->a0 = psci_mem_chk_range(a1, a2);
+		break;
 	case PSCI_NODE_HW_STATE:
 		args->a0 = psci_node_hw_state(a1, a2);
+		break;
+	case PSCI_SYSTEM_SUSPEND:
+		args->a0 = psci_system_suspend(a1, a2, nsec);
 		break;
 	default:
 		args->a0 = OPTEE_SMC_RETURN_UNKNOWN_FUNCTION;

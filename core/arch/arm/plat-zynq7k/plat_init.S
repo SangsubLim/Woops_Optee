@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: BSD-2-Clause */
 /*
  * Copyright (c) 2014, STMicroelectronics International N.V.
  * All rights reserved.
@@ -39,7 +40,6 @@
 #include <arm32_macros_cortex_a9.S>
 #include <asm.S>
 #include <kernel/tz_ssvce_def.h>
-#include <kernel/unwind.h>
 #include <platform_config.h>
 
 #define ZYNQ_SLCR_L2C_RAM	0xF8000A1C
@@ -57,8 +57,6 @@
  * Trap CPU in case of error.
  */
 FUNC plat_cpu_reset_early , :
-UNWIND(	.fnstart)
-
 	/*
 	 * Disallow NSec to mask FIQ [bit4: FW=0]
 	 * Allow NSec to manage Imprecise Abort [bit5: AW=1]
@@ -90,22 +88,17 @@ UNWIND(	.fnstart)
 	 * PCR = 0x00000001
 	 * - no change latency, enable clk gating
 	 */
-	movw r0, #0x4000
-	movt r0, #0x0000
+	mov_imm r0, 0x00004000
 	write_sctlr r0
 
-	movw r0, #0x0041
-	movt r0, #0x0000
+	mov_imm r0, 0x00000041
 	write_actlr r0
 
-	movw r0, #0x0FFF
-	movt r0, #0x0002
+	mov_imm r0, 0x00020C00
 	write_nsacr r0
 
-	movw r0, #0x0000
-	movt r0, #0x0001
+	mov_imm r0, 0x00000001
 	write_pcr r0
 
 	mov pc, lr
-UNWIND(	.fnend)
 END_FUNC plat_cpu_reset_early

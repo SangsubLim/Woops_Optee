@@ -1,5 +1,8 @@
+/* SPDX-License-Identifier: BSD-2-Clause */
 /*
  * Copyright (c) 2014, Allwinner Technology Co., Ltd.
+ * Copyright (c) 2018, Linaro Limited
+ * Copyright (c) 2018, Amit Singh Tomar <amittomer25@gmail.com
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -28,125 +31,32 @@
 #ifndef PLATFORM_CONFIG_H
 #define PLATFORM_CONFIG_H
 
-#define STACK_ALIGNMENT		8
+#include <mm/generic_ram_layout.h>
 
-#ifdef CFG_WITH_PAGER
-#error "Pager not supported for platform sunxi"
-#endif
-#ifdef CFG_WITH_LPAE
-#error "LPAE not supported for platform sunxi"
-#endif
+/* Make stacks aligned to data cache line length */
+#define STACK_ALIGNMENT		64
 
-#define GIC_BASE		0x01c40000
+/* 16550 UART */
+#define CONSOLE_UART_BASE	0x01c28000 /* UART0 */
+#define CONSOLE_UART_CLK_IN_HZ	24000000
+#define CONSOLE_BAUDRATE	115200
+#define SUNXI_UART_REG_SIZE	0x400
+
+#if defined(PLATFORM_FLAVOR_bpi_zero)
+#define GIC_BASE		0x01c80000
 #define GICC_OFFSET		0x2000
 #define GICD_OFFSET		0x1000
-#define UART0_BASE		0x07000000
-#define UART1_BASE		0x07000400
-#define UART2_BASE		0x07000800
-#define UART3_BASE		0x07000c00
-#define CCI400_BASE             0x01c90000
-#define SMC_BASE                0x01c0b000
-#define PRCM_BASE               0x08001400
-
-/* CCI-400 register defines */
-#define CCI400_SECURE_ACCESS_REG  (0x8)
-
-/* PRCM register defines */
-#define PRCM_CPU_SOFT_ENTRY_REG   (0x164)
-
-/* console uart define */
-#define CONSOLE_UART_BASE       UART0_BASE
-
-#define DRAM0_BASE		0x20000000
-#define DRAM0_SIZE		0x80000000
-
-/* Location of trusted dram on sunxi */
-#define TZDRAM_BASE		0x9C000000
-#define TZDRAM_SIZE		0x04000000
-
-#define CFG_TEE_CORE_NB_CORE	8
-
-#define DDR_PHYS_START		DRAM0_BASE
-#define DDR_SIZE		DRAM0_SIZE
-
-#define CFG_DDR_START		DDR_PHYS_START
-#define CFG_DDR_SIZE		DDR_SIZE
-
-#define CFG_DDR_TEETZ_RESERVED_START	TZDRAM_BASE
-#define CFG_DDR_TEETZ_RESERVED_SIZE	TZDRAM_SIZE
-
-#define TEE_RAM_START		(TZDRAM_BASE)
-#define TEE_RAM_SIZE		(1 * 1024 * 1024)
-
-/*
- * TEE/TZ RAM layout:
- *
- *  +-----------------------------------------+  <- CFG_DDR_TEETZ_RESERVED_START
- *  | TEETZ private RAM  |  TEE_RAM           |   ^
- *  |                    +--------------------+   |
- *  |                    |  TA_RAM            |   |
- *  +-----------------------------------------+   | CFG_DDR_TEETZ_RESERVED_SIZE
- *  |                    |      teecore alloc |   |
- *  |  TEE/TZ and NSec   |  PUB_RAM   --------|   |
- *  |   shared memory    |         NSec alloc |   |
- *  +-----------------------------------------+   v
- *
- *  TEE_RAM : 1MByte
- *  PUB_RAM : 1MByte
- *  TA_RAM  : all what is left (at least 2MByte !)
- */
-
-/* define the several memory area sizes */
-#if (CFG_DDR_TEETZ_RESERVED_SIZE < (4 * 1024 * 1024))
-#error "Invalid CFG_DDR_TEETZ_RESERVED_SIZE: at least 4MB expected"
+#define SUNXI_TZPC_BASE		0x01c23400
+#define SUNXI_TZPC_REG_SIZE	0x400
+#define SUNXI_CPUCFG_BASE	0x01f01c00
+#define SUNXI_CPUCFG_REG_SIZE	0x400
+#define SUNXI_PRCM_BASE		0x01f01400
+#define SUNXI_PRCM_REG_SIZE	0x400
+#define PRCM_CPU_SOFT_ENTRY_REG	0x164
 #endif
 
-#define CFG_TEE_RAM_PH_SIZE		(1 * 1024 * 1024)
-#define CFG_TEE_RAM_SIZE		CFG_TEE_RAM_PH_SIZE
-#define CFG_TA_RAM_SIZE			(CFG_DDR_TEETZ_RESERVED_SIZE - \
-					CFG_TEE_RAM_SIZE - CFG_SHMEM_SIZE)
+#if defined(PLATFORM_FLAVOR_sun50i_a64)
+#define SUNXI_SMC_BASE		0x01c1e000
+#endif
 
-/* define the secure/unsecure memory areas */
-#define CFG_DDR_ARMTZ_ONLY_START	(CFG_DDR_TEETZ_RESERVED_START)
-#define CFG_DDR_ARMTZ_ONLY_SIZE		(CFG_TEE_RAM_SIZE + CFG_TA_RAM_SIZE)
-
-#define CFG_DDR_ARM_ARMTZ_START		\
-			(CFG_DDR_ARMTZ_ONLY_START + CFG_DDR_ARMTZ_ONLY_SIZE)
-#define CFG_DDR_ARM_ARMTZ_SIZE		(CFG_PUB_RAM_SIZE)
-
-/* define the memory areas (TEE_RAM must start at reserved DDR start addr */
-#define CFG_TEE_RAM_START		(CFG_DDR_ARMTZ_ONLY_START)
-#define CFG_TA_RAM_START		(CFG_TEE_RAM_START + CFG_TEE_RAM_SIZE)
-#define CFG_PUB_RAM_START		(CFG_TA_RAM_START + CFG_TA_RAM_SIZE)
-
-/* Full GlobalPlatform test suite requires CFG_SHMEM_SIZE to be at least 2MB */
-#define CFG_SHMEM_START		(DDR_PHYS_START + 0x1000000)
-#define CFG_SHMEM_SIZE		0x100000
-
-#define CFG_TEE_LOAD_ADDR	TEE_RAM_START
-
-/* AHB0 devices */
-#define DEVICE0_PA_BASE		ROUNDDOWN(0x01400000, CORE_MMU_DEVICE_SIZE)
-#define DEVICE0_VA_BASE		DEVICE0_PA_BASE
-#define DEVICE0_SIZE		ROUNDUP(0x00900000, CORE_MMU_DEVICE_SIZE)
-#define DEVICE0_TYPE		MEM_AREA_IO_SEC
-
-/* AHB1 devices */
-#define DEVICE1_PA_BASE		ROUNDDOWN(0x00800000, CORE_MMU_DEVICE_SIZE)
-#define DEVICE1_VA_BASE		DEVICE1_PA_BASE
-#define DEVICE1_SIZE		ROUNDUP(0x00300000, CORE_MMU_DEVICE_SIZE)
-#define DEVICE1_TYPE		MEM_AREA_IO_SEC
-
-/* AHB2 devices */
-#define DEVICE2_PA_BASE		ROUNDDOWN(0x03000000, CORE_MMU_DEVICE_SIZE)
-#define DEVICE2_VA_BASE		DEVICE2_PA_BASE
-#define DEVICE2_SIZE		ROUNDUP(0x01000000, CORE_MMU_DEVICE_SIZE)
-#define DEVICE2_TYPE		MEM_AREA_IO_SEC
-
-/* AHBS devices */
-#define DEVICE3_PA_BASE		ROUNDDOWN(0x06000000, CORE_MMU_DEVICE_SIZE)
-#define DEVICE3_VA_BASE		DEVICE3_PA_BASE
-#define DEVICE3_SIZE		ROUNDUP(0x02200000, CORE_MMU_DEVICE_SIZE)
-#define DEVICE3_TYPE		MEM_AREA_IO_SEC
-
-#endif /*PLATFORM_CONFIG_H*/
+#endif /* PLATFORM_CONFIG_H */

@@ -1,5 +1,7 @@
+/* SPDX-License-Identifier: BSD-2-Clause */
 /*
  * Copyright (C) 2015 Freescale Semiconductor, Inc.
+ * Copyright (c) 2020, Linaro Limited
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -24,13 +26,42 @@
  * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  * POSSIBILITY OF SUCH DAMAGE.
  */
-#ifndef NS16550_H
-#define NS16550_H
+#ifndef __DRIVERS_NS16550_H
+#define __DRIVERS_NS16550_H
 
+#include <drivers/serial.h>
+#include <io.h>
 #include <types_ext.h>
 
-void ns16550_putc(int ch, vaddr_t base);
+#define NS16550_UART_REG_SIZE	0x1000
 
-void ns16550_flush(vaddr_t base);
+#define IO_WIDTH_U8		0
+#define IO_WIDTH_U32		1
 
-#endif /* NS16550_H */
+struct ns16550_data {
+	struct io_pa_va base;
+	struct serial_chip chip;
+	uint8_t io_width;
+	uint8_t reg_shift;
+};
+
+static inline unsigned int serial_in(vaddr_t addr, uint8_t io_width)
+{
+	if (io_width == IO_WIDTH_U32)
+		return io_read32(addr);
+	else
+		return io_read8(addr);
+}
+
+static inline void serial_out(vaddr_t addr, uint8_t io_width, int ch)
+{
+	if (io_width == IO_WIDTH_U32)
+		io_write32(addr, ch);
+	else
+		io_write8(addr, ch);
+}
+
+void ns16550_init(struct ns16550_data *pd, paddr_t base, uint8_t io_width,
+		  uint8_t reg_shift);
+
+#endif /* __DRIVERS_NS16550_H */

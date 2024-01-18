@@ -1,28 +1,6 @@
+/* SPDX-License-Identifier: BSD-2-Clause */
 /*
  * Copyright (c) 2015, Linaro Limited
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice,
- * this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- * this list of conditions and the following disclaimer in the documentation
- * and/or other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
  */
 
 	.altmacro
@@ -123,3 +101,83 @@
 	ldp     \r1, \r2, [sp], #16
 	.endm
 
+	.macro mov_imm _reg, _val
+	.if (((\_val) >> 31) == 0 || ((\_val) >> 31) == 0x1ffffffff)
+		movz    \_reg, :abs_g1_s:\_val
+	.else
+		.if (((\_val) >> 47) == 0 || ((\_val) >> 47) == 0x1ffff)
+			movz    \_reg, :abs_g2_s:\_val
+		.else
+			movz    \_reg, :abs_g3:\_val
+			movk    \_reg, :abs_g2_nc:\_val
+		.endif
+		movk    \_reg, :abs_g1_nc:\_val
+	.endif
+		movk    \_reg, :abs_g0_nc:\_val
+	.endm
+
+	.macro add_imm _reg, _val
+	.if ((\_val) > 0xfff)
+		add	\_reg, \_reg, ((\_val) >> 12), LSL #12
+	.endif
+	.if (((\_val) & 0xfff) > 0)
+		add	\_reg, \_reg, ((\_val) & 0xfff)
+	.endif
+	.endm
+
+	.macro sub_imm _reg, _val
+	.if ((\_val) > 0xfff)
+		sub	\_reg, \_reg, ((\_val) >> 12), LSL #12
+	.endif
+	.if (((\_val) & 0xfff) > 0)
+		sub	\_reg, \_reg, ((\_val) & 0xfff)
+	.endif
+	.endm
+
+	/*
+	 * Load address of <sym> into <reg>, <sym> being in the range
+	 * +/- 4GB of the PC (note that 'adr reg, sym' is limited to +/- 1MB).
+	 */
+	.macro adr_l reg, sym
+	adrp	\reg, \sym
+	add	\reg, \reg, :lo12:\sym
+	.endm
+
+	.macro panic_at_smc_return
+#if defined(CFG_TEE_CORE_DEBUG)
+		bl	__panic_at_smc_return
+#else
+		b	.
+#endif
+	.endm
+
+	.macro read_apiakeylo reg
+	mrs	\reg, S3_0_c2_c1_0
+	.endm
+
+	.macro read_apiakeyhi reg
+	mrs	\reg, S3_0_c2_c1_1
+	.endm
+
+	.macro write_apiakeylo reg
+	msr	S3_0_c2_c1_0, \reg
+	.endm
+
+	.macro write_apiakeyhi reg
+	msr	S3_0_c2_c1_1, \reg
+	.endm
+
+	.macro write_pan reg
+	/* msr pan, \reg */
+	msr	S3_0_c4_c2_3, \reg
+	.endm
+
+	.macro write_pan_enable
+	/* msr pan, #1 */
+	msr	S0_0_c4_c1_4, xzr
+	.endm
+
+	.macro write_pan_disable
+	/* msr pan, #0 */
+	msr	S0_0_c4_c0_4, xzr
+	.endm

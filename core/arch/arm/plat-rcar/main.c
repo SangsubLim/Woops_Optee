@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-2-Clause
 /*
  * Copyright (c) 2016, GlobalLogic
  * All rights reserved.
@@ -26,70 +27,72 @@
  */
 
 #include <console.h>
-#include <kernel/generic_boot.h>
+#include <crypto/crypto.h>
+#include <kernel/boot.h>
 #include <kernel/panic.h>
-#include <kernel/pm_stubs.h>
 #include <mm/core_memprot.h>
 #include <platform_config.h>
 #include <stdint.h>
-#include <tee/entry_std.h>
-#include <tee/entry_fast.h>
 #include <drivers/scif.h>
 #include <drivers/gic.h>
 
-register_phys_mem(MEM_AREA_IO_SEC, CONSOLE_UART_BASE, SCIF_REG_SIZE);
-register_phys_mem(MEM_AREA_IO_SEC, GICD_BASE, GIC_DIST_REG_SIZE);
-register_phys_mem(MEM_AREA_IO_SEC, GICC_BASE, GIC_DIST_REG_SIZE);
+register_phys_mem_pgdir(MEM_AREA_IO_SEC, CONSOLE_UART_BASE, SCIF_REG_SIZE);
+register_phys_mem_pgdir(MEM_AREA_IO_SEC, GICD_BASE, GIC_DIST_REG_SIZE);
+register_phys_mem_pgdir(MEM_AREA_IO_SEC, GICC_BASE, GIC_CPU_REG_SIZE);
+#ifdef PRR_BASE
+register_phys_mem_pgdir(MEM_AREA_IO_SEC, PRR_BASE, SMALL_PAGE_SIZE);
+#endif
 
-static void main_fiq(void);
+/* Legacy platforms */
+#if defined(PLATFORM_FLAVOR_salvator_h3) || \
+	defined(PLATFORM_FLAVOR_salvator_h3_4x2g) || \
+	defined(PLATFORM_FLAVOR_salvator_m3) || \
+	defined(PLATFORM_FLAVOR_salvator_m3_2x4g) || \
+	defined(PLATFORM_FLAVOR_spider_s4)
+register_ddr(NSEC_DDR_0_BASE, NSEC_DDR_0_SIZE);
+register_ddr(NSEC_DDR_1_BASE, NSEC_DDR_1_SIZE);
+#ifdef NSEC_DDR_2_BASE
+register_ddr(NSEC_DDR_2_BASE, NSEC_DDR_2_SIZE);
+#endif
+#ifdef NSEC_DDR_3_BASE
+register_ddr(NSEC_DDR_3_BASE, NSEC_DDR_3_SIZE);
+#endif
+#endif
 
-static const struct thread_handlers handlers = {
-	.std_smc = tee_entry_std,
-	.fast_smc = tee_entry_fast,
-	.fiq = main_fiq,
-	.cpu_on = cpu_on_handler,
-	.cpu_off = pm_do_nothing,
-	.cpu_suspend = pm_do_nothing,
-	.cpu_resume = pm_do_nothing,
-	.system_off = pm_do_nothing,
-	.system_reset = pm_do_nothing,
-};
+static struct scif_uart_data console_data __nex_bss;
 
-const struct thread_handlers *generic_boot_get_handlers(void)
-{
-	return &handlers;
-}
-
-static void main_fiq(void)
-{
-	panic();
-}
-
-static vaddr_t console_base(void)
-{
-	static void *va;
-
-	if (cpu_mmu_enabled()) {
-		if (!va)
-			va = phys_to_virt(CONSOLE_UART_BASE, MEM_AREA_IO_SEC);
-		return (vaddr_t)va;
-	}
-	return CONSOLE_UART_BASE;
-}
+#ifdef PRR_BASE
+uint32_t rcar_prr_value __nex_bss;
+#endif
 
 void console_init(void)
 {
-	scif_uart_init(console_base());
+	scif_uart_init(&console_data, CONSOLE_UART_BASE);
+	register_serial_console(&console_data.chip);
 }
 
-void console_putc(int ch)
+#ifdef CFG_RCAR_ROMAPI
+/* Should only seed from a hardware random number generator */
+static_assert(!IS_ENABLED(CFG_WITH_SOFTWARE_PRNG));
+
+unsigned long plat_get_aslr_seed(void)
 {
-	if (ch == '\n')
-		scif_uart_putc('\r', console_base());
-	scif_uart_putc(ch, console_base());
+	unsigned long seed = 0;
+
+	/* On RCAR we can get hw random bytes on early boot stages */
+	if (crypto_rng_read(&seed, sizeof(seed)))
+		panic();
+
+	return seed;
+}
+#endif
+
+void boot_primary_init_intc(void)
+{
+	gic_init(GICC_BASE, GICD_BASE);
 }
 
-void console_flush(void)
+void boot_secondary_init_intc(void)
 {
-	scif_uart_flush(console_base());
+	gic_init_per_cpu();
 }

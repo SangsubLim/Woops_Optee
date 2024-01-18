@@ -1,38 +1,17 @@
+/* SPDX-License-Identifier: BSD-2-Clause */
 /*
  * Copyright (c) 2014, STMicroelectronics International N.V.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice,
- * this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- * this list of conditions and the following disclaimer in the documentation
- * and/or other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
  */
+
+#include <limits.h>
 
 /*
  * This file provides what C99 standard requires in
  * 7.18 interger types <stdint.h>
  */
 
-#ifndef STDINT_H
-#define STDINT_H
-#define _STDINT_H
+#ifndef __STDINT_H
+#define __STDINT_H
 
 /*
  * If compiler supplies neither __ILP32__ or __LP64__, try to figure it out
@@ -54,7 +33,7 @@
 #error Neither __ILP32__ nor __LP64__ is defined
 #endif
 
-#ifndef ASM
+#ifndef __ASSEMBLER__
 
 /* 7.18.1.1 Exact-width interger types */
 #ifndef __int8_t_defined
@@ -113,7 +92,7 @@ typedef unsigned long uintptr_t;
 typedef int64_t intmax_t;
 typedef uint64_t uintmax_t;
 
-#endif /*ASM*/
+#endif /*__ASSEMBLER__*/
 
 /*
  * 7.18.2 Limits of specified-width integer types
@@ -188,6 +167,20 @@ typedef uint64_t uintmax_t;
  * 7.18.4 Macros for integer constants
  */
 
+#ifdef __ASSEMBLER__
+#define U(v)		v
+#define UL(v)		v
+#define ULL(v)		v
+#define L(v)		v
+#define LL(v)		v
+#else
+#define U(v)		v ## U
+#define UL(v)		v ## UL
+#define ULL(v)		v ## ULL
+#define L(v)		v ## L
+#define LL(v)		v ## LL
+#endif
+
 /* 7.18.4.1 Macros for minimum-width integer constants */
 
 #define INT8_C(v)	v
@@ -195,26 +188,21 @@ typedef uint64_t uintmax_t;
 #define INT16_C(v)	v
 #define UINT16_C(v)	v
 #define INT32_C(v)	v
-#define UINT32_C(v)	v ## U
+#define UINT32_C(v)	U(v)
 #ifdef __ILP32__
-#define INT64_C(v)	v ## LL
-#define UINT64_C(v)	v ## ULL
+#define INT64_C(v)	LL(v)
+#define UINT64_C(v)	ULL(v)
 #endif
 #ifdef __LP64__
-#define INT64_C(v)	v ## L
-#define UINT64_C(v)	v ## UL
+#define INT64_C(v)	L(v)
+#define UINT64_C(v)	UL(v)
 #endif
 
-#ifdef ASM
-#define UINTPTR_C(v) v
-#else
-#define UINTPTR_C(v) v ## LU
-#endif
+#define UINTPTR_C(v)	UL(v)
 
 /* 7.18.4.2 Macros for greatest-width integer constants */
 
 #define INTMAX_C(v)	INT64_C(v)
 #define UINTMAX_C(v)	UINT64_C(v)
 
-
-#endif /* STDINT_H */
+#endif /* __STDINT_H */

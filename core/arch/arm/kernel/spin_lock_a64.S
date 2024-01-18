@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: (BSD-2-Clause AND BSD-3-Clause) */
 /*
  * Copyright (c) 2015, Linaro Limited
  * All rights reserved.
@@ -87,3 +88,5 @@ FUNC __cpu_spin_unlock , :
 	stlr	wzr, [x0]
 	ret
 END_FUNC __cpu_spin_unlock
+
+BTI(emit_aarch64_feature_1_and     GNU_PROPERTY_AARCH64_FEATURE_1_BTI)

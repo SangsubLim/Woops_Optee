@@ -1,55 +1,77 @@
+/* SPDX-License-Identifier: BSD-2-Clause */
 /*
  * Copyright (c) 2014, STMicroelectronics International N.V.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice,
- * this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- * this list of conditions and the following disclaimer in the documentation
- * and/or other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
  */
-#ifndef ASSERT_H
-#define ASSERT_H
+#ifndef __ASSERT_H
+#define __ASSERT_H
 
 #include <compiler.h>
 #include <trace.h>
 
-void _assert_break(void) __noreturn;
+void __noreturn _assert_break(void);
 void _assert_log(const char *expr, const char *file, const int line,
 			const char *func);
 
-/* assert() specs: generates a log but does not panic if NDEBUG is defined */
+static inline void __noreturn _assert_trap(const char *expr_str,
+					   const char *file, const int line,
+					   const char *func)
+{
+	_assert_log(expr_str, file, line, func);
+	_assert_break();
+}
+
+static inline void _runtime_assert_trap(const char *expr_str, const char *file,
+					const int line, const char *func)
+{
+	volatile bool do_break = true;
+
+	_assert_log(expr_str, file, line, func);
+	if (do_break)
+		_assert_break();
+}
+
+/*
+ * runtime_assert() behaves as assert() except that it doesn't tell the
+ * compiler it will never return. This can be used to avoid the warning:
+ * error: function might be candidate for attribute ‘noreturn’
+ */
 #ifdef NDEBUG
-#define assert(expr)	do { } while (0)
+#define assert(expr)	((void)0)
+#define runtime_assert(expr)	((void)0)
 #else
-#define assert(expr) \
-	do { \
-		if (!(expr)) { \
-			_assert_log(#expr, __FILE__, __LINE__, __func__); \
-			_assert_break(); \
-		} \
-	} while (0)
+#define assert(expr)	\
+	((expr) ? (void)0 : _assert_trap(#expr, __FILE__, __LINE__, __func__))
+#define runtime_assert(expr)	\
+	((expr) ? (void)0 : \
+		_runtime_assert_trap(#expr, __FILE__, __LINE__, __func__))
 #endif
 
+/* This macro is deprecated, please use static_assert instead */
 #define COMPILE_TIME_ASSERT(x) \
 	do { \
 		switch (0) { case 0: case ((x) ? 1: 0): default : break; } \
 	} while (0)
 
 #endif
+
+#if !defined(__cplusplus) || (__cplusplus < 201103L)
+#if defined(__HAVE_SINGLE_ARGUMENT_STATIC_ASSERT)
+#define static_assert _Static_assert
+#else
+/*
+ * In gcc prior to 9.1 _Static_assert requires two arguments. To allow
+ * passing a single argument to static_assert() add a workaround with
+ * macros.
+ */
+#define ___args_count(_0, _1, x, ...) x
+#define __args_count(...) ___args_count(__VA_ARGS__, 2, 1, 0)
+
+#define __static_assert_1(expr)		_Static_assert(expr, "")
+#define __static_assert_2(expr, msg)	_Static_assert(expr, msg)
+#define ___static_assert(count, ...)	__static_assert_ ## count(__VA_ARGS__)
+#define __static_assert(count, ...)	___static_assert(count, __VA_ARGS__)
+
+#define static_assert(...) \
+	__static_assert(__args_count(__VA_ARGS__), __VA_ARGS__)
+#endif
+#endif /* __ASSERT_H */

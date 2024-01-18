@@ -1,35 +1,15 @@
+// SPDX-License-Identifier: BSD-2-Clause
 /*
- * Copyright (c) 2016, Linaro Limited.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice,
- * this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- * this list of conditions and the following disclaimer in the documentation
- * and/or other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
+ * Copyright (c) 2016-2020, Linaro Limited.
  */
+
+#include <kernel/tee_common_otp.h>
+#include <kernel/tee_ta_manager.h>
+#include <kernel/user_access.h>
+#include <tee/tee_cryp_utl.h>
 #include <tee/tee_svc.h>
 #include <user_ta_header.h>
 #include <util.h>
-#include <kernel/tee_ta_manager.h>
-#include <kernel/tee_common_otp.h>
-#include <tee/tee_cryp_utl.h>
 
 /*
  * The data to hash is 48 bytes made up of:
@@ -45,7 +25,7 @@
  * Note that this code assumes an endorsement seed
  * size == device ID size for convenience.
  */
-static TEE_Result get_prop_endorsement(struct tee_ta_session *sess,
+static TEE_Result get_prop_endorsement(struct ts_session *sess,
 				       void *buf, size_t *blen)
 {
 	TEE_Result res;
@@ -74,7 +54,7 @@ static TEE_Result get_prop_endorsement(struct tee_ta_session *sess,
 
 	*bin_len = ta_endorsement_seed_size;
 
-	return tee_svc_copy_to_user((void *)buf, bin, sizeof(bin));
+	return copy_to_user(buf, bin, sizeof(bin));
 }
 
 static const struct tee_props vendor_propset_array_tee[] = {

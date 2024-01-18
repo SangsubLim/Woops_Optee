@@ -1,31 +1,13 @@
+// SPDX-License-Identifier: BSD-2-Clause
 /*
  * Copyright (c) 2016, Linaro Limited
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice,
- * this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- * this list of conditions and the following disclaimer in the documentation
- * and/or other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
  */
+#include <assert.h>
 #include <drivers/hi16xx_uart.h>
 #include <io.h>
+#include <keep.h>
+#include <mm/core_mmu.h>
+#include <util.h>
 
 /* Register offsets */
 
@@ -76,56 +58,84 @@
 #define UART_USR_RFNE_BIT	3	/* Receive FIFO not empty bit */
 #define UART_USR_RFF_BIT	4	/* Receive FIFO full bit */
 
-void hi16xx_uart_flush(vaddr_t base)
+static vaddr_t chip_to_base(struct serial_chip *chip)
 {
-	while (!(read32(base + UART_USR) & UART_USR_TFE_BIT))
+	struct hi16xx_uart_data *pd =
+		container_of(chip, struct hi16xx_uart_data, chip);
+
+	return io_pa_or_va(&pd->base, HI16XX_UART_REG_SIZE);
+}
+
+static void hi16xx_uart_flush(struct serial_chip *chip)
+{
+	vaddr_t base = chip_to_base(chip);
+
+	while (!(io_read32(base + UART_USR) & UART_USR_TFE_BIT))
 		;
 }
 
-void hi16xx_uart_init(vaddr_t base, uint32_t uart_clk, uint32_t baud_rate)
+static void hi16xx_uart_putc(struct serial_chip *chip, int ch)
 {
-	uint16_t freq_div = uart_clk / (16 * baud_rate);
+	vaddr_t base = chip_to_base(chip);
 
-	/* Enable (and clear) FIFOs */
-	write32(UART_FCR_FIFO_EN, base + UART_FCR);
-
-	/* Enable access to _DLL and _DLH */
-	write32(UART_LCR_DLAB, base + UART_LCR);
-
-	/* Calculate and set UART_DLL */
-	write32(freq_div & 0xFF, base + UART_DLL);
-
-	/* Calculate and set UART_DLH */
-	write32((freq_div >> 8) & 0xFF, base + UART_DLH);
-
-	/* Clear _DLL/_DLH access bit, set data size (8 bits), parity etc. */
-	write32(UART_LCR_DLS8, base + UART_LCR);
-
-	/* Disable interrupt mode */
-	write32(0, base + UART_IEL);
-
-	hi16xx_uart_flush(base);
-}
-
-void hi16xx_uart_putc(int ch, vaddr_t base)
-{
 	/* Wait until TX FIFO is empty */
-	while (!(read32(base + UART_USR) & UART_USR_TFE_BIT))
+	while (!(io_read32(base + UART_USR) & UART_USR_TFE_BIT))
 		;
 
 	/* Put character into TX FIFO */
-	write32(ch & 0xFF, base + UART_THR);
+	io_write32(base + UART_THR, ch & 0xFF);
 }
 
-bool hi16xx_uart_have_rx_data(vaddr_t base)
+static bool hi16xx_uart_have_rx_data(struct serial_chip *chip)
 {
-	return (read32(base + UART_USR) & UART_USR_RFNE_BIT);
+	vaddr_t base = chip_to_base(chip);
+
+	return (io_read32(base + UART_USR) & UART_USR_RFNE_BIT);
 }
 
-int hi16xx_uart_getchar(vaddr_t base)
+static int hi16xx_uart_getchar(struct serial_chip *chip)
 {
-	while (!hi16xx_uart_have_rx_data(base))
+	vaddr_t base = chip_to_base(chip);
+
+	while (!hi16xx_uart_have_rx_data(chip))
 		;
-	return read32(base + UART_RBR) & 0xFF;
+	return io_read32(base + UART_RBR) & 0xFF;
+}
+
+static const struct serial_ops hi16xx_uart_ops = {
+	.flush = hi16xx_uart_flush,
+	.getchar = hi16xx_uart_getchar,
+	.have_rx_data = hi16xx_uart_have_rx_data,
+	.putc = hi16xx_uart_putc,
+};
+DECLARE_KEEP_PAGER(hi16xx_uart_ops);
+
+void hi16xx_uart_init(struct hi16xx_uart_data *pd, paddr_t base,
+		      uint32_t uart_clk, uint32_t baud_rate)
+{
+	uint16_t freq_div = uart_clk / (16 * baud_rate);
+
+	pd->base.pa = base;
+	pd->chip.ops = &hi16xx_uart_ops;
+
+	/* Enable (and clear) FIFOs */
+	io_write32(base + UART_FCR, UART_FCR_FIFO_EN);
+
+	/* Enable access to _DLL and _DLH */
+	io_write32(base + UART_LCR, UART_LCR_DLAB);
+
+	/* Calculate and set UART_DLL */
+	io_write32(base + UART_DLL, freq_div & 0xFF);
+
+	/* Calculate and set UART_DLH */
+	io_write32(base + UART_DLH, (freq_div >> 8) & 0xFF);
+
+	/* Clear _DLL/_DLH access bit, set data size (8 bits), parity etc. */
+	io_write32(base + UART_LCR, UART_LCR_DLS8);
+
+	/* Disable interrupt mode */
+	io_write32(base + UART_IEL, 0);
+
+	hi16xx_uart_flush(&pd->chip);
 }
 

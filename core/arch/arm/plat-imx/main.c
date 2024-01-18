@@ -1,8 +1,9 @@
+// SPDX-License-Identifier: BSD-2-Clause
 /*
  * Copyright (C) 2015 Freescale Semiconductor, Inc.
- * All rights reserved.
  * Copyright (c) 2016, Wind River Systems.
  * All rights reserved.
+ * Copyright 2019, 2023 NXP
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -27,176 +28,95 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include <arm32.h>
+#include <arm.h>
 #include <console.h>
 #include <drivers/gic.h>
 #include <drivers/imx_uart.h>
-#include <io.h>
-#include <kernel/generic_boot.h>
-#include <kernel/misc.h>
-#include <kernel/panic.h>
-#include <kernel/pm_stubs.h>
-#include <mm/core_mmu.h>
+#include <imx.h>
+#include <kernel/boot.h>
 #include <mm/core_memprot.h>
+#include <mm/core_mmu.h>
 #include <platform_config.h>
 #include <stdint.h>
-#include <sm/optee_smc.h>
-#include <tee/entry_fast.h>
-#include <tee/entry_std.h>
 
-#if defined(PLATFORM_FLAVOR_mx6qsabrelite) || \
-	defined(PLATFORM_FLAVOR_mx6qsabresd)
-#include <kernel/tz_ssvce_pl310.h>
+static struct imx_uart_data console_data __nex_bss;
+
+#ifdef CONSOLE_UART_BASE
+register_phys_mem_pgdir(MEM_AREA_IO_NSEC, CONSOLE_UART_BASE,
+			CORE_MMU_PGDIR_SIZE);
+#endif
+#ifdef GIC_BASE
+register_phys_mem_pgdir(MEM_AREA_IO_SEC, GIC_BASE, CORE_MMU_PGDIR_SIZE);
+#endif
+#ifdef ANATOP_BASE
+register_phys_mem_pgdir(MEM_AREA_IO_SEC, ANATOP_BASE, CORE_MMU_PGDIR_SIZE);
+#endif
+#ifdef GICD_BASE
+register_phys_mem_pgdir(MEM_AREA_IO_SEC, GICD_BASE, 0x10000);
+#endif
+#ifdef AIPS0_BASE
+register_phys_mem_pgdir(MEM_AREA_IO_SEC, AIPS0_BASE,
+			ROUNDUP(AIPS0_SIZE, CORE_MMU_PGDIR_SIZE));
+#endif
+#ifdef AIPS1_BASE
+register_phys_mem_pgdir(MEM_AREA_IO_SEC, AIPS1_BASE,
+			ROUNDUP(AIPS1_SIZE, CORE_MMU_PGDIR_SIZE));
+#endif
+#ifdef AIPS2_BASE
+register_phys_mem_pgdir(MEM_AREA_IO_SEC, AIPS2_BASE,
+			ROUNDUP(AIPS2_SIZE, CORE_MMU_PGDIR_SIZE));
+#endif
+#ifdef AIPS3_BASE
+register_phys_mem_pgdir(MEM_AREA_IO_SEC, AIPS3_BASE,
+			ROUNDUP(AIPS3_SIZE, CORE_MMU_PGDIR_SIZE));
+#endif
+#ifdef IRAM_BASE
+register_phys_mem(MEM_AREA_TEE_COHERENT,
+		  ROUNDDOWN(IRAM_BASE, CORE_MMU_PGDIR_SIZE),
+		  CORE_MMU_PGDIR_SIZE);
+#endif
+#ifdef M4_AIPS_BASE
+register_phys_mem(MEM_AREA_IO_SEC, M4_AIPS_BASE, M4_AIPS_SIZE);
+#endif
+#ifdef IRAM_S_BASE
+register_phys_mem(MEM_AREA_TEE_COHERENT,
+		  ROUNDDOWN(IRAM_S_BASE, CORE_MMU_PGDIR_SIZE),
+		  CORE_MMU_PGDIR_SIZE);
 #endif
 
-static void main_fiq(void);
-static struct gic_data gic_data;
-
-static const struct thread_handlers handlers = {
-	.std_smc = tee_entry_std,
-	.fast_smc = tee_entry_fast,
-	.fiq = main_fiq,
-	.cpu_on = pm_panic,
-	.cpu_off = pm_panic,
-	.cpu_suspend = pm_panic,
-	.cpu_resume = pm_panic,
-	.system_off = pm_panic,
-	.system_reset = pm_panic,
-};
-
-register_phys_mem(MEM_AREA_IO_NSEC, CONSOLE_UART_BASE, CORE_MMU_DEVICE_SIZE);
-register_phys_mem(MEM_AREA_IO_SEC, GIC_BASE, CORE_MMU_DEVICE_SIZE);
-
-#if defined(PLATFORM_FLAVOR_mx6qsabrelite) || \
-	defined(PLATFORM_FLAVOR_mx6qsabresd)
-register_phys_mem(MEM_AREA_IO_SEC, PL310_BASE, CORE_MMU_DEVICE_SIZE);
-register_phys_mem(MEM_AREA_IO_SEC, SRC_BASE, CORE_MMU_DEVICE_SIZE);
+#if defined(CFG_PL310)
+register_phys_mem_pgdir(MEM_AREA_IO_SEC,
+			ROUNDDOWN(PL310_BASE, CORE_MMU_PGDIR_SIZE),
+			CORE_MMU_PGDIR_SIZE);
 #endif
 
-const struct thread_handlers *generic_boot_get_handlers(void)
-{
-	return &handlers;
-}
-
-static void main_fiq(void)
-{
-	panic();
-}
-
-#if defined(PLATFORM_FLAVOR_mx6qsabrelite) || \
-	defined(PLATFORM_FLAVOR_mx6qsabresd)
-void plat_cpu_reset_late(void)
-{
-	uintptr_t addr;
-
-	if (!get_core_pos()) {
-		/* primary core */
-#if defined(CFG_BOOT_SYNC_CPU)
-		/* set secondary entry address and release core */
-		write32(CFG_TEE_LOAD_ADDR, SRC_BASE + SRC_GPR1 + 8);
-		write32(CFG_TEE_LOAD_ADDR, SRC_BASE + SRC_GPR1 + 16);
-		write32(CFG_TEE_LOAD_ADDR, SRC_BASE + SRC_GPR1 + 24);
-
-		write32(SRC_SCR_CPU_ENABLE_ALL, SRC_BASE + SRC_SCR);
+#ifdef CFG_DRAM_BASE
+register_ddr(CFG_DRAM_BASE, CFG_DDR_SIZE);
 #endif
-
-		/* SCU config */
-		write32(SCU_INV_CTRL_INIT, SCU_BASE + SCU_INV_SEC);
-		write32(SCU_SAC_CTRL_INIT, SCU_BASE + SCU_SAC);
-		write32(SCU_NSAC_CTRL_INIT, SCU_BASE + SCU_NSAC);
-
-		/* SCU enable */
-		write32(read32(SCU_BASE + SCU_CTRL) | 0x1,
-			SCU_BASE + SCU_CTRL);
-
-		/* configure imx6 CSU */
-
-		/* first grant all peripherals */
-		for (addr = CSU_BASE + CSU_CSL_START;
-			 addr != CSU_BASE + CSU_CSL_END;
-			 addr += 4)
-			write32(CSU_ACCESS_ALL, addr);
-
-		/* lock the settings */
-		for (addr = CSU_BASE + CSU_CSL_START;
-			 addr != CSU_BASE + CSU_CSL_END;
-			 addr += 4)
-			write32(read32(addr) | CSU_SETTING_LOCK, addr);
-	}
-}
+#ifdef CFG_NSEC_DDR_1_BASE
+register_ddr(CFG_NSEC_DDR_1_BASE, CFG_NSEC_DDR_1_SIZE);
 #endif
-
-static vaddr_t console_base(void)
-{
-	static void *va;
-
-	if (cpu_mmu_enabled()) {
-		if (!va)
-			va = phys_to_virt(CONSOLE_UART_BASE,
-					  MEM_AREA_IO_NSEC);
-		return (vaddr_t)va;
-	}
-	return CONSOLE_UART_BASE;
-}
 
 void console_init(void)
 {
-	vaddr_t base = console_base();
-
-	imx_uart_init(base);
+#ifdef CONSOLE_UART_BASE
+	imx_uart_init(&console_data, CONSOLE_UART_BASE);
+	register_serial_console(&console_data.chip);
+#endif
 }
 
-void console_putc(int ch)
+void boot_primary_init_intc(void)
 {
-	vaddr_t base = console_base();
-
-	/* If \n, also do \r */
-	if (ch == '\n')
-		imx_uart_putc('\r', base);
-	imx_uart_putc(ch, base);
+#ifdef GICD_BASE
+	gic_init(0, GICD_BASE);
+#else
+	gic_init(GIC_BASE + GICC_OFFSET, GIC_BASE + GICD_OFFSET);
+#endif
 }
 
-void console_flush(void)
+#if CFG_TEE_CORE_NB_CORE > 1
+void boot_secondary_init_intc(void)
 {
-	vaddr_t base = console_base();
-
-	imx_uart_flush_tx_fifo(base);
-}
-
-void main_init_gic(void)
-{
-	vaddr_t gicc_base;
-	vaddr_t gicd_base;
-
-	gicc_base = (vaddr_t)phys_to_virt(GIC_BASE + GICC_OFFSET,
-					  MEM_AREA_IO_SEC);
-	gicd_base = (vaddr_t)phys_to_virt(GIC_BASE + GICD_OFFSET,
-					  MEM_AREA_IO_SEC);
-
-	if (!gicc_base || !gicd_base)
-		panic();
-
-	/* Initialize GIC */
-	gic_init(&gic_data, gicc_base, gicd_base);
-	itr_init(&gic_data.chip);
-}
-
-#if defined(PLATFORM_FLAVOR_mx6qsabrelite) || \
-	defined(PLATFORM_FLAVOR_mx6qsabresd)
-vaddr_t pl310_base(void)
-{
-	static void *va __early_bss;
-
-	if (cpu_mmu_enabled()) {
-		if (!va)
-			va = phys_to_virt(PL310_BASE, MEM_AREA_IO_SEC);
-		return (vaddr_t)va;
-	}
-	return PL310_BASE;
-}
-
-void main_secondary_init_gic(void)
-{
-	gic_cpu_init(&gic_data);
+	gic_init_per_cpu();
 }
 #endif

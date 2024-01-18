@@ -1,37 +1,18 @@
+/* SPDX-License-Identifier: BSD-2-Clause */
 /*
  * Copyright (c) 2016, Linaro Limited
  * Copyright (c) 2014, STMicroelectronics International N.V.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice,
- * this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- * this list of conditions and the following disclaimer in the documentation
- * and/or other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
  */
 
-#ifndef SM_SM_H
-#define SM_SM_H
+#ifndef __SM_SM_H
+#define __SM_SM_H
 
+#ifndef __ASSEMBLER__
+
+#include <compiler.h>
 #include <types_ext.h>
 
-struct sm_mode_regs {
+struct sm_unbanked_regs {
 	uint32_t usr_sp;
 	uint32_t usr_lr;
 	uint32_t irq_spsr;
@@ -53,10 +34,17 @@ struct sm_mode_regs {
 	uint32_t und_spsr;
 	uint32_t und_sp;
 	uint32_t und_lr;
+#ifdef CFG_SM_NO_CYCLE_COUNTING
+	uint32_t pmcr;
+#endif
+#ifdef CFG_FTRACE_SUPPORT
+	uint32_t cntkctl;
+	uint32_t pad;
+#endif
 };
 
 struct sm_nsec_ctx {
-	struct sm_mode_regs mode_regs;
+	struct sm_unbanked_regs ub_regs;
 
 	uint32_t r8;
 	uint32_t r9;
@@ -79,7 +67,7 @@ struct sm_nsec_ctx {
 };
 
 struct sm_sec_ctx {
-	struct sm_mode_regs mode_regs;
+	struct sm_unbanked_regs ub_regs;
 
 	uint32_t r0;
 	uint32_t r1;
@@ -96,8 +84,13 @@ struct sm_sec_ctx {
 };
 
 struct sm_ctx {
+#ifndef CFG_SM_NO_CYCLE_COUNTING
 	uint32_t pad;
+#endif
 	struct sm_sec_ctx sec;
+#ifdef CFG_SM_NO_CYCLE_COUNTING
+	uint32_t pad;
+#endif
 	struct sm_nsec_ctx nsec;
 };
 
@@ -106,8 +99,6 @@ struct sm_ctx {
  * sm_ctx.
  */
 #define SM_STACK_TMP_RESERVE_SIZE	sizeof(struct sm_ctx)
-
-
 
 /* Returns storage location of non-secure context for current CPU */
 struct sm_nsec_ctx *sm_get_nsec_ctx(void);
@@ -120,4 +111,35 @@ void *sm_get_sp(void);
  */
 void sm_init(vaddr_t stack_pointer);
 
-#endif /*SM_SM_H*/
+enum sm_handler_ret {
+	SM_HANDLER_SMC_HANDLED = 0,
+	SM_HANDLER_PENDING_SMC,
+};
+
+/*
+ * Returns whether SMC was handled from platform handler in secure monitor
+ * or if it shall reach OP-TEE core .
+ */
+enum sm_handler_ret sm_platform_handler(struct sm_ctx *ctx);
+
+void sm_save_unbanked_regs(struct sm_unbanked_regs *regs);
+void sm_restore_unbanked_regs(struct sm_unbanked_regs *regs);
+
+/*
+ * These function return to secure monitor by SMC instead of a normal
+ * function return.
+ */
+void vector_std_smc_entry(uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3,
+			  uint32_t a4, uint32_t a5, uint32_t a6, uint32_t a7);
+void vector_fast_smc_entry(uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3,
+			   uint32_t a4, uint32_t a5, uint32_t a6, uint32_t a7);
+void vector_fiq_entry(uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3,
+		      uint32_t a4, uint32_t a5, uint32_t a6, uint32_t a7);
+
+#endif /*!__ASSEMBLER__*/
+
+/* 32 bit return value for sm_from_nsec() */
+#define SM_EXIT_TO_NON_SECURE		0
+#define SM_EXIT_TO_SECURE		1
+
+#endif /*__SM_SM_H*/

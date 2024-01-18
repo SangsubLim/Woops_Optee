@@ -17,12 +17,25 @@ define check-conf-h
 	cnf='$(strip $(foreach var,				\
 		$(call cfg-vars-by-prefix,$1),			\
 		$(call cfg-make-define,$(var))))';		\
-	guard="_`echo $@ | tr -- -/. ___`_";			\
+	guard="_`echo $@ | tr -- -/.+ _`_";			\
 	mkdir -p $(dir $@);					\
 	echo "#ifndef $${guard}" >$@.tmp;			\
 	echo "#define $${guard}" >>$@.tmp;			\
 	echo -n "$${cnf}" | sed 's/_nl_ */\n/g' >>$@.tmp;	\
 	echo "#endif" >>$@.tmp;					\
+	$(call mv-if-changed,$@.tmp,$@)
+endef
+
+define check-conf-cmake
+	$(q)set -e;						\
+	$(cmd-echo-silent) '  CHK     $@';			\
+	cnf='$(strip $(foreach var,				\
+		$(call cfg-vars-by-prefix,$1),			\
+		$(call cfg-cmake-set,$(var))))';		\
+	mkdir -p $(dir $@);					\
+	echo "# auto-generated TEE configuration file" >$@.tmp; \
+	echo "# TEE version ${TEE_IMPL_VERSION}" >>$@.tmp; \
+	echo -n "$${cnf}" | sed 's/_nl_ */\n/g' >>$@.tmp;	\
 	$(call mv-if-changed,$@.tmp,$@)
 endef
 
@@ -40,16 +53,6 @@ define check-conf-mk
 	echo "PLATFORM_FLAVOR=${PLATFORM_FLAVOR}" >>$@.tmp; 	\
 	echo -n "$${cnf}" | sed 's/_nl_ */\n/g' >>$@.tmp;	\
 	$(call mv-if-changed,$@.tmp,$@)
-endef
-
-# Rename $1 to $2 only if file content differs. Otherwise just delete $1.
-define mv-if-changed
-	if [ -r $2 ] && cmp -s $2 $1; then			\
-		rm -f $1;					\
-	else							\
-		$(cmd-echo-silent) '  UPD     $2';		\
-		mv $1 $2;					\
-	fi
 endef
 
 define cfg-vars-by-prefix
@@ -73,35 +76,45 @@ define cfg-make-define
 			  #define $1 $($1)_nl_)))
 endef
 
-# Returns 'y' if at least one variable is 'y', empty otherwise
+# Convert a makefile variable to a cmake set statement
+# <undefined>, n => <undefined>
+# <other value>  => <other value>
+define cfg-cmake-set
+	$(strip $(if $(filter xn x,x$($1)),
+		  # $1 is not set _nl_,
+		  set($1 $($1))_nl_))
+endef
+
+# Returns 'y' if at least one variable is 'y', 'n' otherwise
 # Example:
 # FOO_OR_BAR := $(call cfg-one-enabled, FOO BAR)
-cfg-one-enabled = $(if $(filter y, $(foreach var,$(1),$($(var)))),y,)
+cfg-one-enabled = $(if $(filter y, $(foreach var,$(1),$($(var)))),y,n)
 
-# Returns 'y' if all variables are 'y', empty otherwise
+# Returns 'y' if all variables are 'y', 'n' otherwise
 # Example:
 # FOO_AND_BAR := $(call cfg-all-enabled, FOO BAR)
-cfg-all-enabled =                                                             \
-    $(strip                                                                   \
-        $(if $(1),                                                            \
-            $(if $(filter y,$($(firstword $(1)))),                            \
-                $(call cfg-all-enabled,$(filter-out $(firstword $(1)),$(1))), \
-             ),                                                               \
-            y                                                                 \
-         )                                                                    \
+cfg-all-enabled = $(if $(strip $(1)),$(if $(call _cfg-all-enabled,$(1)),y,n),n)
+_cfg-all-enabled =                                                             \
+    $(strip                                                                    \
+        $(if $(1),                                                             \
+            $(if $(filter y,$($(firstword $(1)))),                             \
+                $(call _cfg-all-enabled,$(filter-out $(firstword $(1)),$(1))), \
+             ),                                                                \
+            y                                                                  \
+         )                                                                     \
      )
 
 # Disable a configuration variable if some dependency is disabled
 # Example:
 # $(eval $(call cfg-depends-all,FOO,BAR BAZ))
-# Will clear FOO if it is initially 'y' and BAR or BAZ are not 'y'
+# Will set FOO to 'n' if it is initially 'y' and BAR or BAZ are not 'y'
 cfg-depends-all =                                                           \
     $(strip                                                                 \
         $(if $(filter y, $($(1))),                                          \
-            $(if $(call cfg-all-enabled,$(2)),                              \
+            $(if $(filter y,$(call cfg-all-enabled,$(2))),                  \
                 ,                                                           \
                 $(warning Warning: Disabling $(1) [requires $(strip $(2))]) \
-                    override $(1) :=                                        \
+                    override $(1) := n                                      \
              )                                                              \
          )                                                                  \
      )
@@ -109,14 +122,14 @@ cfg-depends-all =                                                           \
 # Disable a configuration variable if all dependencies are disabled
 # Example:
 # $(eval $(call cfg-depends-one,FOO,BAR BAZ))
-# Will clear FOO if it is initially 'y' and both BAR and BAZ are not 'y'
+# Will set FOO to 'n' if it is initially 'y' and both BAR and BAZ are not 'y'
 cfg-depends-one =                                                                    \
     $(strip                                                                          \
         $(if $(filter y, $($(1))),                                                   \
-            $(if $(call cfg-one-enabled,$(2)),                                       \
+            $(if $(filter y,$(call cfg-one-enabled,$(2))),                           \
                 ,                                                                    \
                 $(warning Warning: Disabling $(1) [requires (one of) $(strip $(2))]) \
-                    override $(1) :=                                                 \
+                    override $(1) := n                                               \
              )                                                                       \
          )                                                                           \
      )
@@ -141,12 +154,20 @@ cfg-enable-all-depends =                                                        
         )                                                                                  \
      )
 
+# Check if a configuration variable has an acceptable value
+# Example:
+# $(call cfg-check-value,FOO,foo bar)
+# Will do nothing if $(CFG_FOO) is either foo or bar, and error out otherwise.
+cfg-check-value =                                                          \
+    $(if $(filter-out $(2),$(CFG_$(1))),                                   \
+        $(error CFG_$(1) is set to '$(CFG_$(1))', valid values are: $(2)))
+
 # Set a variable or error out if it was previously set to a different value
 # The reason message (3rd parameter) is optional
 # Example:
 # $(call force,CFG_FOO,foo,required by CFG_BAR)
 define force
-$(eval $(call _force,$(1),$(2),$(3)))
+$(eval $(call _force,$(strip $(1)),$(2),$(3)))
 endef
 
 define _force

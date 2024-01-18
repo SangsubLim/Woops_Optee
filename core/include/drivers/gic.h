@@ -1,29 +1,7 @@
+/* SPDX-License-Identifier: BSD-2-Clause */
 /*
  * Copyright (c) 2016, Linaro Limited
  * Copyright (c) 2014, STMicroelectronics International N.V.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice,
- * this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- * this list of conditions and the following disclaimer in the documentation
- * and/or other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
  */
 
 #ifndef __DRIVERS_GIC_H
@@ -31,29 +9,51 @@
 #include <types_ext.h>
 #include <kernel/interrupt.h>
 
+#if defined(CFG_ARM_GICV3)
 #define GIC_DIST_REG_SIZE	0x10000
 #define GIC_CPU_REG_SIZE	0x10000
+#else
+#define GIC_DIST_REG_SIZE	0x1000
+#define GIC_CPU_REG_SIZE	0x1000
+#endif
 
-struct gic_data {
-	vaddr_t gicc_base;
-	vaddr_t gicd_base;
-	size_t max_it;
-	struct itr_chip chip;
-};
+#define GIC_PPI_BASE		U(16)
+#define GIC_SPI_BASE		U(32)
+
+#define GIC_SGI_TO_ITNUM(x)	(x)
+#define GIC_PPI_TO_ITNUM(x)	((x) + GIC_PPI_BASE)
+#define GIC_SPI_TO_ITNUM(x)	((x) + GIC_SPI_BASE)
 
 /*
- * The two gic_init_* functions initializes the struct gic_data which is
- * then used by the other functions.
+ * Default lowest ID for secure SGIs, note that this does not account for
+ * interrupts donated to non-secure world with gic_init_donate_sgi_to_ns().
  */
+#define GIC_SGI_SEC_BASE	8
+/* Max ID for secure SGIs */
+#define GIC_SGI_SEC_MAX		15
 
-void gic_init(struct gic_data *gd, paddr_t gicc_base, paddr_t gicd_base);
-/* initial base address only */
-void gic_init_base_addr(struct gic_data *gd, vaddr_t gicc_base,
-			vaddr_t gicd_base);
-/* initial cpu if only, mainly use for secondary cpu setup cpu interface */
-void gic_cpu_init(struct gic_data *gd);
+/*
+ * The two gic_init() and gic_init_v3() functions initializes the struct
+ * gic_data which is then used by the other functions. These two functions
+ * also initializes the GIC and are only supposed to be called from the
+ * primary boot CPU.
+ */
+void gic_init_v3(paddr_t gicc_base_pa, paddr_t gicd_base_pa,
+		 paddr_t gicr_base_pa);
+static inline void gic_init(paddr_t gicc_base_pa, paddr_t gicd_base_pa)
+{
+	gic_init_v3(gicc_base_pa, gicd_base_pa, 0);
+}
 
-void gic_it_handle(struct gic_data *gd);
+/* Donates one of the secure SGIs to normal world */
+void gic_init_donate_sgi_to_ns(size_t it);
 
-void gic_dump_state(struct gic_data *gd);
+/*
+ * Does per-CPU specific GIC initialization, should be called by all
+ * secondary CPUs when booting.
+ */
+void gic_init_per_cpu(void);
+
+/* Print GIC state to console */
+void gic_dump_state(void);
 #endif /*__DRIVERS_GIC_H*/

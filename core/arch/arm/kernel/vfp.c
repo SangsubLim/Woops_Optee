@@ -1,28 +1,6 @@
+// SPDX-License-Identifier: BSD-2-Clause
 /*
  * Copyright (c) 2015, Linaro Limited
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice,
- * this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- * this list of conditions and the following disclaimer in the documentation
- * and/or other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
  */
 
 #include <arm.h>
@@ -54,9 +32,9 @@ void vfp_lazy_save_state_init(struct vfp_state *state)
 	vfp_write_fpexc(fpexc & ~FPEXC_EN);
 }
 
-void vfp_lazy_save_state_final(struct vfp_state *state)
+void vfp_lazy_save_state_final(struct vfp_state *state, bool force_save)
 {
-	if (state->fpexc & FPEXC_EN) {
+	if ((state->fpexc & FPEXC_EN) || force_save) {
 		uint32_t fpexc = vfp_read_fpexc();
 
 		assert(!(fpexc & FPEXC_EN));
@@ -116,10 +94,10 @@ void vfp_lazy_save_state_init(struct vfp_state *state)
 	vfp_disable();
 }
 
-void vfp_lazy_save_state_final(struct vfp_state *state)
+void vfp_lazy_save_state_final(struct vfp_state *state, bool force_save)
 {
 	if ((CPACR_EL1_FPEN(state->cpacr_el1) & CPACR_EL1_FPEN_EL0EL1) ||
-	    state->force_save) {
+	    force_save) {
 		assert(!vfp_is_enabled());
 		vfp_enable();
 		state->fpcr = read_fpcr();

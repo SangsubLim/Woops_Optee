@@ -1,161 +1,133 @@
+// SPDX-License-Identifier: BSD-2-Clause
 /*
- * Copyright (c) 2016, Linaro Limited
+ * Copyright (c) 2016-2023, Linaro Limited
  * Copyright (c) 2014, STMicroelectronics International N.V.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice,
- * this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- * this list of conditions and the following disclaimer in the documentation
- * and/or other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include <platform_config.h>
-
-#include <stdint.h>
-#include <string.h>
-
+#include <arm.h>
+#include <config.h>
+#include <console.h>
 #include <drivers/gic.h>
+#include <drivers/hfic.h>
 #include <drivers/pl011.h>
 #include <drivers/tzc400.h>
-
-#include <arm.h>
-#include <kernel/generic_boot.h>
-#include <kernel/pm_stubs.h>
-#include <trace.h>
+#include <initcall.h>
+#include <keep.h>
+#include <kernel/boot.h>
+#include <kernel/interrupt.h>
 #include <kernel/misc.h>
+#include <kernel/notif.h>
 #include <kernel/panic.h>
+#include <kernel/spinlock.h>
 #include <kernel/tee_time.h>
-#include <tee/entry_fast.h>
-#include <tee/entry_std.h>
+#include <kernel/thread_spmc.h>
 #include <mm/core_memprot.h>
 #include <mm/core_mmu.h>
-#include <console.h>
-#include <keep.h>
-#include <initcall.h>
+#include <platform_config.h>
+#include <sm/psci.h>
+#include <stdint.h>
+#include <string.h>
+#include <trace.h>
 
-static void main_fiq(void);
+static struct pl011_data console_data __nex_bss;
 
-static const struct thread_handlers handlers = {
-	.std_smc = tee_entry_std,
-	.fast_smc = tee_entry_fast,
-	.fiq = main_fiq,
-#if defined(CFG_WITH_ARM_TRUSTED_FW)
-	.cpu_on = cpu_on_handler,
-	.cpu_off = pm_do_nothing,
-	.cpu_suspend = pm_do_nothing,
-	.cpu_resume = pm_do_nothing,
-	.system_off = pm_do_nothing,
-	.system_reset = pm_do_nothing,
+register_phys_mem_pgdir(MEM_AREA_IO_SEC, CONSOLE_UART_BASE, PL011_REG_SIZE);
+#if defined(PLATFORM_FLAVOR_fvp)
+register_phys_mem(MEM_AREA_RAM_SEC, TZCDRAM_BASE, TZCDRAM_SIZE);
+#endif
+#if defined(PLATFORM_FLAVOR_qemu_virt)
+register_phys_mem_pgdir(MEM_AREA_IO_SEC, SECRAM_BASE, SECRAM_COHERENT_SIZE);
+#endif
+#ifdef DRAM0_BASE
+register_ddr(DRAM0_BASE, DRAM0_SIZE);
+#endif
+#ifdef DRAM1_BASE
+register_ddr(DRAM1_BASE, DRAM1_SIZE);
+#endif
+
+#ifdef CFG_GIC
+register_phys_mem_pgdir(MEM_AREA_IO_SEC, GICC_BASE, GIC_CPU_REG_SIZE);
+register_phys_mem_pgdir(MEM_AREA_IO_SEC, GICD_BASE, GIC_DIST_REG_SIZE);
+#ifdef GIC_REDIST_BASE
+register_phys_mem_pgdir(MEM_AREA_IO_SEC, GIC_REDIST_BASE, GIC_REDIST_SIZE);
+#endif
+
+void boot_primary_init_intc(void)
+{
+#ifdef GIC_REDIST_BASE
+	gic_init_v3(GIC_BASE + GICC_OFFSET, GIC_BASE + GICD_OFFSET,
+		    GIC_REDIST_BASE);
 #else
-	.cpu_on = pm_panic,
-	.cpu_off = pm_panic,
-	.cpu_suspend = pm_panic,
-	.cpu_resume = pm_panic,
-	.system_off = pm_panic,
-	.system_reset = pm_panic,
+	gic_init(GIC_BASE + GICC_OFFSET, GIC_BASE + GICD_OFFSET);
 #endif
-};
+	if (IS_ENABLED(CFG_CORE_SEL1_SPMC) &&
+	    IS_ENABLED(CFG_CORE_ASYNC_NOTIF)) {
+		size_t it = CFG_CORE_ASYNC_NOTIF_GIC_INTID;
 
-static struct gic_data gic_data;
-
-register_phys_mem(MEM_AREA_IO_SEC, CONSOLE_UART_BASE, PL011_REG_SIZE);
-
-const struct thread_handlers *generic_boot_get_handlers(void)
-{
-	return &handlers;
-}
-
-#ifdef GIC_BASE
-
-register_phys_mem(MEM_AREA_IO_SEC, GICD_BASE, GIC_DIST_REG_SIZE);
-register_phys_mem(MEM_AREA_IO_SEC, GICC_BASE, GIC_DIST_REG_SIZE);
-
-void main_init_gic(void)
-{
-	vaddr_t gicc_base;
-	vaddr_t gicd_base;
-
-	gicc_base = (vaddr_t)phys_to_virt(GIC_BASE + GICC_OFFSET,
-					  MEM_AREA_IO_SEC);
-	gicd_base = (vaddr_t)phys_to_virt(GIC_BASE + GICD_OFFSET,
-					  MEM_AREA_IO_SEC);
-	if (!gicc_base || !gicd_base)
-		panic();
-
-#if defined(PLATFORM_FLAVOR_fvp) || defined(PLATFORM_FLAVOR_juno) || \
-	defined(PLATFORM_FLAVOR_qemu_armv8a)
-	/* On ARMv8, GIC configuration is initialized in ARM-TF */
-	gic_init_base_addr(&gic_data, gicc_base, gicd_base);
-#else
-	/* Initialize GIC */
-	gic_init(&gic_data, gicc_base, gicd_base);
-#endif
-	itr_init(&gic_data.chip);
-}
-#endif
-
-static void main_fiq(void)
-{
-	gic_it_handle(&gic_data);
-}
-
-static vaddr_t console_base(void)
-{
-	static void *va;
-
-	if (cpu_mmu_enabled()) {
-		if (!va)
-			va = phys_to_virt(CONSOLE_UART_BASE, MEM_AREA_IO_SEC);
-		return (vaddr_t)va;
+		if (it >= GIC_SGI_SEC_BASE && it <= GIC_SGI_SEC_MAX)
+			gic_init_donate_sgi_to_ns(it);
+		thread_spmc_set_async_notif_intid(it);
 	}
-	return CONSOLE_UART_BASE;
 }
+
+void boot_secondary_init_intc(void)
+{
+	gic_init_per_cpu();
+}
+#endif /*CFG_GIC*/
+
+#ifdef CFG_CORE_HAFNIUM_INTC
+void boot_primary_init_intc(void)
+{
+	hfic_init();
+}
+#endif
 
 void console_init(void)
 {
-	pl011_init(console_base(), CONSOLE_UART_CLK_IN_HZ, CONSOLE_BAUDRATE);
+	pl011_init(&console_data, CONSOLE_UART_BASE, CONSOLE_UART_CLK_IN_HZ,
+		   CONSOLE_BAUDRATE);
+	register_serial_console(&console_data.chip);
 }
 
-void console_putc(int ch)
-{
-	vaddr_t base = console_base();
+#if (defined(CFG_GIC) || defined(CFG_CORE_HAFNIUM_INTC)) && \
+	defined(IT_CONSOLE_UART) && \
+	!defined(CFG_NS_VIRTUALIZATION) && \
+	!(defined(CFG_WITH_ARM_TRUSTED_FW) && defined(CFG_ARM_GICV2))
+/*
+ * This cannot be enabled with TF-A and GICv3 because TF-A then need to
+ * assign the interrupt number of the UART to OP-TEE (S-EL1). Currently
+ * there's no way of TF-A to know which interrupts that OP-TEE will serve.
+ * If TF-A doesn't assign the interrupt we're enabling below to OP-TEE it
+ * will hang in EL3 since the interrupt will just be delivered again and
+ * again.
+ */
 
-	if (ch == '\n')
-		pl011_putc('\r', base);
-	pl011_putc(ch, base);
+static void read_console(void)
+{
+	struct serial_chip *cons = &console_data.chip;
+
+	if (!cons->ops->getchar || !cons->ops->have_rx_data)
+		return;
+
+	while (cons->ops->have_rx_data(cons)) {
+		int ch __maybe_unused = cons->ops->getchar(cons);
+
+		DMSG("got 0x%x", ch);
+	}
 }
 
-void console_flush(void)
+static enum itr_return console_itr_cb(struct itr_handler *hdl)
 {
-	pl011_flush(console_base());
-}
-
-#ifdef IT_CONSOLE_UART
-static enum itr_return console_itr_cb(struct itr_handler *h __unused)
-{
-	paddr_t uart_base = console_base();
-
-	while (pl011_have_rx_data(uart_base)) {
-		int ch __maybe_unused = pl011_getchar(uart_base);
-
-		DMSG("cpu %zu: got 0x%x", get_core_pos(), ch);
+	if (notif_async_is_started()) {
+		/*
+		 * Asynchronous notifications are enabled, lets read from
+		 * uart in the bottom half instead.
+		 */
+		interrupt_disable(hdl->chip, hdl->it);
+		notif_send_async(NOTIF_VALUE_DO_BOTTOM_HALF);
+	} else {
+		read_console();
 	}
 	return ITRR_HANDLED;
 }
@@ -165,19 +137,57 @@ static struct itr_handler console_itr = {
 	.flags = ITRF_TRIGGER_LEVEL,
 	.handler = console_itr_cb,
 };
-KEEP_PAGER(console_itr);
+DECLARE_KEEP_PAGER(console_itr);
+
+static void atomic_console_notif(struct notif_driver *ndrv __unused,
+				 enum notif_event ev __maybe_unused)
+{
+	DMSG("Asynchronous notifications started, event %d", (int)ev);
+}
+DECLARE_KEEP_PAGER(atomic_console_notif);
+
+static void yielding_console_notif(struct notif_driver *ndrv __unused,
+				   enum notif_event ev)
+{
+	switch (ev) {
+	case NOTIF_EVENT_DO_BOTTOM_HALF:
+		read_console();
+		interrupt_enable(console_itr.chip, console_itr.it);
+		break;
+	case NOTIF_EVENT_STOPPED:
+		DMSG("Asynchronous notifications stopped");
+		interrupt_enable(console_itr.chip, console_itr.it);
+		break;
+	default:
+		EMSG("Unknown event %d", (int)ev);
+	}
+}
+
+struct notif_driver console_notif = {
+	.atomic_cb = atomic_console_notif,
+	.yielding_cb = yielding_console_notif,
+};
 
 static TEE_Result init_console_itr(void)
 {
-	itr_add(&console_itr);
-	itr_enable(IT_CONSOLE_UART);
+	TEE_Result res = TEE_ERROR_GENERIC;
+
+	res = interrupt_add_handler_with_chip(interrupt_get_main_chip(),
+					      &console_itr);
+	if (res)
+		return res;
+
+	interrupt_enable(console_itr.chip, console_itr.it);
+
+	if (IS_ENABLED(CFG_CORE_ASYNC_NOTIF))
+		notif_register_driver(&console_notif);
 	return TEE_SUCCESS;
 }
 driver_init(init_console_itr);
 #endif
 
 #ifdef CFG_TZC400
-register_phys_mem(MEM_AREA_IO_SEC, TZC400_BASE, TZC400_REG_SIZE);
+register_phys_mem_pgdir(MEM_AREA_IO_SEC, TZC400_BASE, TZC400_REG_SIZE);
 
 static TEE_Result init_tzc400(void)
 {
@@ -185,7 +195,7 @@ static TEE_Result init_tzc400(void)
 
 	DMSG("Initializing TZC400");
 
-	va = phys_to_virt(TZC400_BASE, MEM_AREA_IO_SEC);
+	va = phys_to_virt(TZC400_BASE, MEM_AREA_IO_SEC, TZC400_REG_SIZE);
 	if (!va) {
 		EMSG("TZC400 not mapped");
 		panic();
@@ -199,3 +209,50 @@ static TEE_Result init_tzc400(void)
 
 service_init(init_tzc400);
 #endif /*CFG_TZC400*/
+
+#if defined(PLATFORM_FLAVOR_qemu_virt)
+static void release_secondary_early_hpen(size_t pos)
+{
+	struct mailbox {
+		uint64_t ep;
+		uint64_t hpen[];
+	} *mailbox;
+
+	if (cpu_mmu_enabled())
+		mailbox = phys_to_virt(SECRAM_BASE, MEM_AREA_IO_SEC,
+				       SECRAM_COHERENT_SIZE);
+	else
+		mailbox = (void *)SECRAM_BASE;
+
+	if (!mailbox)
+		panic();
+
+	mailbox->ep = TEE_LOAD_ADDR;
+	dsb_ishst();
+	mailbox->hpen[pos] = 1;
+	dsb_ishst();
+	sev();
+}
+
+int psci_cpu_on(uint32_t core_id, uint32_t entry, uint32_t context_id)
+{
+	size_t pos = get_core_pos_mpidr(core_id);
+	static bool core_is_released[CFG_TEE_CORE_NB_CORE];
+
+	if (!pos || pos >= CFG_TEE_CORE_NB_CORE)
+		return PSCI_RET_INVALID_PARAMETERS;
+
+	DMSG("core pos: %zu: ns_entry %#" PRIx32, pos, entry);
+
+	if (core_is_released[pos]) {
+		EMSG("core %zu already released", pos);
+		return PSCI_RET_DENIED;
+	}
+	core_is_released[pos] = true;
+
+	boot_set_core_ns_entry(pos, entry, context_id);
+	release_secondary_early_hpen(pos);
+
+	return PSCI_RET_SUCCESS;
+}
+#endif /*PLATFORM_FLAVOR_qemu_virt*/

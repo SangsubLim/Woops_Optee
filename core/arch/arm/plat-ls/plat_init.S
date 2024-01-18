@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: BSD-2-Clause */
 /*
  * Copyright (c) 2016, Wind River Systems.
  * All rights reserved.
@@ -35,7 +36,6 @@
 #include <arm32.h>
 #include <arm32_macros.S>
 #include <asm.S>
-#include <kernel/unwind.h>
 #include <platform_config.h>
 
 .section .text
@@ -51,8 +51,6 @@
  * Trap CPU in case of error.
  */
 FUNC plat_cpu_reset_early , :
-UNWIND(	.fnstart)
-
 	/*
 	 * Disallow NSec to mask FIQ [bit4: FW=0]
 	 * Allow NSec to manage Imprecise Abort [bit5: AW=1]
@@ -69,25 +67,21 @@ UNWIND(	.fnstart)
 	 *
 	 * SCTLR = 0x00000000
 	 *
-	 * ACTRL = 0x00000041
-	 * - core always in full SMP (FW bit0=1)
+	 * ACTRL = 0x00000040
+	 * - core NOT booted in full SMP (FW bit0=0)
 	 *
-	 * NSACR = 0x00020C00
+	 * NSACR = 0x00000C00
 	 * - NSec cannot change ACTRL.SMP (NS_SMP bit18=0)
 	 * - NSec can use SIMD/VFP (CP10/CP11) (bit15:14=2b00, bit11:10=2b11)
 	 */
-	movw r0, #0x0000
-	movt r0, #0x0000
+	mov_imm r0, 0x00000000
 	write_sctlr r0
 
-	movw r0, #0x0040
-	movt r0, #0x0000
+	mov_imm r0, 0x00000040
 	write_actlr r0
 
-	movw r0, #0x0C00
-	movt r0, #0x0000
+	mov_imm r0, 0x00000C00
 	write_nsacr r0
 
 	mov pc, lr
-UNWIND(	.fnend)
 END_FUNC plat_cpu_reset_early

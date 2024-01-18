@@ -1,6 +1,8 @@
+/* SPDX-License-Identifier: BSD-3-Clause */
 /*
  * Copyright (c) 1994-2009  Red Hat, Inc.
  * Copyright (c) 2016, Linaro Limited
+ * Copyright 2022-2023 NXP
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -33,28 +35,45 @@
 #ifndef __SETJMP_H
 #define __SETJMP_H
 
-#if defined(__arm__) || defined(__thumb__)
+#include <compiler.h>
+
+#if defined(ARM32)
 /*
  * All callee preserved registers:
  * v1 - v7, fp, ip, sp, lr, f4, f5, f6, f7
+ * One additional 32-bit value used in case ftrace
+ * is enabled to restore ftrace return stack.
  */
-#define _JBLEN 23
+#define _JBLEN 24
+#define _JBTYPE int
 #endif
 
-#if defined(__aarch64__)
+#if defined(ARM64)
 #define _JBLEN 22
 #define _JBTYPE long long
 #endif
 
-#ifdef _JBLEN
-#ifdef _JBTYPE
-typedef	_JBTYPE jmp_buf[_JBLEN];
-#else
-typedef	int jmp_buf[_JBLEN];
-#endif
+#if defined(RV64) || defined(RV32)
+/*
+ * Callee preserved registers:
+ * s0-s11, ra, sp
+ * One additional value used in case ftrace
+ * is enabled to restore ftrace return stack.
+ */
+#define _JBLEN 15
+#define _JBTYPE unsigned long
 #endif
 
-void longjmp(jmp_buf env, int val);
+#ifdef _JBLEN
+typedef	_JBTYPE jmp_buf[_JBLEN];
+#endif
+
+void __noreturn longjmp(jmp_buf env, int val);
 int setjmp(jmp_buf env);
+
+#ifdef CFG_FTRACE_SUPPORT
+void ftrace_longjmp(unsigned int *ret_idx);
+void ftrace_setjmp(unsigned int *ret_idx);
+#endif
 
 #endif /*__SETJMP_H*/

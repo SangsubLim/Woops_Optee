@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 /*	$OpenBSD: qsort.c,v 1.10 2005/08/08 08:05:37 espie Exp $ */
 /*-
  * Copyright (c) 1992, 1993
@@ -46,7 +47,7 @@ static __inline void	 swapfunc(char *, char *, int, int);
 			*pj++ = t;				\
 		} while (--i > 0);				\
 }
-#define SWAPINIT(a, es) swaptype = ((char *)a - (char *)0) % sizeof(long) || \
+#define SWAPINIT(a, es) swaptype = (uintptr_t)a % sizeof(long) || \
 		es % sizeof(long) ? 2 : es == sizeof(long)? 0 : 1;
 static __inline void
 swapfunc(char *a, char *b, int n, int swaptype)

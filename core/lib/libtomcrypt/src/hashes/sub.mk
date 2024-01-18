@@ -1,15 +1,14 @@
-srcs-$(CFG_CRYPTO_MD5) += md5.c
+srcs-$(_CFG_CORE_LTC_MD5_DESC) += md5.c
 
-ifeq ($(CFG_CRYPTO_SHA1),y)
-SHA1_CE := $(call cfg-one-enabled, CFG_CRYPTO_SHA1_ARM32_CE CFG_CRYPTO_SHA1_ARM64_CE)
-ifeq ($(SHA1_CE),y)
-srcs-y += sha1_armv8a_ce.c
-srcs-$(CFG_CRYPTO_SHA1_ARM32_CE) += sha1_armv8a_ce_a32.S
-srcs-$(CFG_CRYPTO_SHA1_ARM64_CE) += sha1_armv8a_ce_a64.S
-else
+ifeq ($(_CFG_CORE_LTC_SHA1_DESC),y)
+ifneq ($(_CFG_CORE_LTC_SHA1_ACCEL),y)
 srcs-y += sha1.c
 endif
 endif
 
+ifneq ($(_CFG_CORE_LTC_SHA3_ACCEL),y)
+srcs-$(_CFG_CORE_LTC_SHA3_DESC) += sha3.c
+endif
+srcs-$(_CFG_CORE_LTC_SHA3_DESC) += sha3_test.c
 subdirs-y += helper
 subdirs-y += sha2

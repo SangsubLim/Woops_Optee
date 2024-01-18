@@ -1,40 +1,23 @@
+// SPDX-License-Identifier: BSD-2-Clause
 /*
- * Copyright (c) 2015, Linaro Limited
- * All rights reserved.
+ * Copyright (c) 2015-2021, Linaro Limited
  * Copyright (c) 2014, STMicroelectronics International N.V.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice,
- * this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- * this list of conditions and the following disclaimer in the documentation
- * and/or other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include <tee/entry_fast.h>
+#include <config.h>
+#include <drivers/wdt.h>
+#include <kernel/boot.h>
+#include <kernel/misc.h>
+#include <kernel/notif.h>
+#include <kernel/tee_l2cc_mutex.h>
+#include <kernel/virtualization.h>
+#include <mm/core_mmu.h>
 #include <optee_msg.h>
 #include <sm/optee_smc.h>
-#include <kernel/generic_boot.h>
-#include <kernel/tee_l2cc_mutex.h>
-#include <kernel/misc.h>
-#include <mm/core_mmu.h>
+#include <sm/watchdog_smc.h>
+#include <tee/entry_fast.h>
 
+#ifdef CFG_CORE_RESERVED_SHM
 static void tee_entry_get_shm_config(struct thread_smc_args *args)
 {
 	args->a0 = OPTEE_SMC_RETURN_OK;
@@ -43,6 +26,7 @@ static void tee_entry_get_shm_config(struct thread_smc_args *args)
 	/* Should this be TEESMC cache attributes instead? */
 	args->a3 = core_mmu_is_shm_cached();
 }
+#endif
 
 static void tee_entry_fastcall_l2cc_mutex(struct thread_smc_args *args)
 {
@@ -82,23 +66,58 @@ static void tee_entry_fastcall_l2cc_mutex(struct thread_smc_args *args)
 
 static void tee_entry_exchange_capabilities(struct thread_smc_args *args)
 {
-	if (args->a1) {
-		/*
-		 * Either unknown capability or
-		 * OPTEE_SMC_NSEC_CAP_UNIPROCESSOR, in either case we can't
-		 * deal with it.
-		 *
-		 * The memory mapping of shared memory is defined as normal
-		 * shared memory for SMP systems and normal memory for UP
-		 * systems. Currently we map all memory as shared in secure
-		 * world.
-		 */
+	bool res_shm_en = IS_ENABLED(CFG_CORE_RESERVED_SHM);
+	bool dyn_shm_en __maybe_unused = false;
+
+	/*
+	 * Currently we ignore OPTEE_SMC_NSEC_CAP_UNIPROCESSOR.
+	 *
+	 * The memory mapping of shared memory is defined as normal
+	 * shared memory for SMP systems and normal memory for UP
+	 * systems. Currently we map all memory as shared in secure
+	 * world.
+	 *
+	 * When translation tables are created with shared bit cleared for
+	 * uniprocessor systems we'll need to check
+	 * OPTEE_SMC_NSEC_CAP_UNIPROCESSOR.
+	 */
+
+	if (args->a1 & ~OPTEE_SMC_NSEC_CAP_UNIPROCESSOR) {
+		/* Unknown capability. */
 		args->a0 = OPTEE_SMC_RETURN_ENOTAVAIL;
 		return;
 	}
 
 	args->a0 = OPTEE_SMC_RETURN_OK;
-	args->a1 = OPTEE_SMC_SEC_CAP_HAVE_RESERVED_SHM;
+	args->a1 = 0;
+
+	if (res_shm_en)
+		args->a1 |= OPTEE_SMC_SEC_CAP_HAVE_RESERVED_SHM;
+	IMSG("Reserved shared memory is %sabled", res_shm_en ? "en" : "dis");
+
+#if defined(CFG_CORE_DYN_SHM)
+	dyn_shm_en = core_mmu_nsec_ddr_is_defined();
+	if (dyn_shm_en)
+		args->a1 |= OPTEE_SMC_SEC_CAP_DYNAMIC_SHM;
+#endif
+	IMSG("Dynamic shared memory is %sabled", dyn_shm_en ? "en" : "dis");
+
+	if (IS_ENABLED(CFG_NS_VIRTUALIZATION))
+		args->a1 |= OPTEE_SMC_SEC_CAP_VIRTUALIZATION;
+	IMSG("Normal World virtualization support is %sabled",
+	     IS_ENABLED(CFG_NS_VIRTUALIZATION) ? "en" : "dis");
+
+	args->a1 |= OPTEE_SMC_SEC_CAP_MEMREF_NULL;
+
+	if (IS_ENABLED(CFG_CORE_ASYNC_NOTIF)) {
+		args->a1 |= OPTEE_SMC_SEC_CAP_ASYNC_NOTIF;
+		args->a2 = NOTIF_VALUE_MAX;
+	}
+	IMSG("Asynchronous notifications are %sabled",
+	     IS_ENABLED(CFG_CORE_ASYNC_NOTIF) ? "en" : "dis");
+
+	args->a1 |= OPTEE_SMC_SEC_CAP_RPC_ARG;
+	args->a3 = THREAD_RPC_MAX_NUM_PARAMS;
 }
 
 static void tee_entry_disable_shm_cache(struct thread_smc_args *args)
@@ -131,7 +150,7 @@ static void tee_entry_enable_shm_cache(struct thread_smc_args *args)
 static void tee_entry_boot_secondary(struct thread_smc_args *args)
 {
 #if defined(CFG_BOOT_SECONDARY_REQUEST)
-	if (!generic_boot_core_release(args->a1, (paddr_t)(args->a3)))
+	if (!boot_core_release(args->a1, (paddr_t)(args->a3)))
 		args->a0 = OPTEE_SMC_RETURN_OK;
 	else
 		args->a0 = OPTEE_SMC_RETURN_EBADCMD;
@@ -140,7 +159,80 @@ static void tee_entry_boot_secondary(struct thread_smc_args *args)
 #endif
 }
 
-void tee_entry_fast(struct thread_smc_args *args)
+static void tee_entry_get_thread_count(struct thread_smc_args *args)
+{
+	args->a0 = OPTEE_SMC_RETURN_OK;
+	args->a1 = CFG_NUM_THREADS;
+}
+
+#if defined(CFG_NS_VIRTUALIZATION)
+static void tee_entry_vm_created(struct thread_smc_args *args)
+{
+	uint16_t guest_id = args->a1;
+
+	/* Only hypervisor can issue this request */
+	if (args->a7 != HYP_CLNT_ID) {
+		args->a0 = OPTEE_SMC_RETURN_ENOTAVAIL;
+		return;
+	}
+
+	if (virt_guest_created(guest_id))
+		args->a0 = OPTEE_SMC_RETURN_ENOTAVAIL;
+	else
+		args->a0 = OPTEE_SMC_RETURN_OK;
+}
+
+static void tee_entry_vm_destroyed(struct thread_smc_args *args)
+{
+	uint16_t guest_id = args->a1;
+
+	/* Only hypervisor can issue this request */
+	if (args->a7 != HYP_CLNT_ID) {
+		args->a0 = OPTEE_SMC_RETURN_ENOTAVAIL;
+		return;
+	}
+
+	if (virt_guest_destroyed(guest_id))
+		args->a0 = OPTEE_SMC_RETURN_ENOTAVAIL;
+	else
+		args->a0 = OPTEE_SMC_RETURN_OK;
+}
+#endif
+
+/* Note: this function is weak to let platforms add special handling */
+void __weak tee_entry_fast(struct thread_smc_args *args)
+{
+	__tee_entry_fast(args);
+}
+
+static void get_async_notif_value(struct thread_smc_args *args)
+{
+	bool value_valid = false;
+	bool value_pending = false;
+
+	args->a0 = OPTEE_SMC_RETURN_OK;
+	args->a1 = notif_get_value(&value_valid, &value_pending);
+	args->a2 = 0;
+	if (value_valid)
+		args->a2 |= OPTEE_SMC_ASYNC_NOTIF_VALID;
+	if (value_pending)
+		args->a2 |= OPTEE_SMC_ASYNC_NOTIF_PENDING;
+}
+
+static void tee_entry_watchdog(struct thread_smc_args *args)
+{
+#if defined(CFG_WDT_SM_HANDLER)
+	__wdt_sm_handler(args);
+#else
+	args->a0 = OPTEE_SMC_RETURN_UNKNOWN_FUNCTION;
+#endif
+}
+
+/*
+ * If tee_entry_fast() is overridden, it's still supposed to call this
+ * function.
+ */
+void __tee_entry_fast(struct thread_smc_args *args)
 {
 	switch (args->a0) {
 
@@ -162,9 +254,11 @@ void tee_entry_fast(struct thread_smc_args *args)
 		break;
 
 	/* OP-TEE specific SMC functions */
+#ifdef CFG_CORE_RESERVED_SHM
 	case OPTEE_SMC_GET_SHM_CONFIG:
 		tee_entry_get_shm_config(args);
 		break;
+#endif
 	case OPTEE_SMC_L2CC_MUTEX:
 		tee_entry_fastcall_l2cc_mutex(args);
 		break;
@@ -180,6 +274,38 @@ void tee_entry_fast(struct thread_smc_args *args)
 	case OPTEE_SMC_BOOT_SECONDARY:
 		tee_entry_boot_secondary(args);
 		break;
+	case OPTEE_SMC_GET_THREAD_COUNT:
+		tee_entry_get_thread_count(args);
+		break;
+
+#if defined(CFG_NS_VIRTUALIZATION)
+	case OPTEE_SMC_VM_CREATED:
+		tee_entry_vm_created(args);
+		break;
+	case OPTEE_SMC_VM_DESTROYED:
+		tee_entry_vm_destroyed(args);
+		break;
+#endif
+
+	case OPTEE_SMC_ENABLE_ASYNC_NOTIF:
+		if (IS_ENABLED(CFG_CORE_ASYNC_NOTIF)) {
+			notif_deliver_atomic_event(NOTIF_EVENT_STARTED);
+			args->a0 = OPTEE_SMC_RETURN_OK;
+		} else {
+			args->a0 = OPTEE_SMC_RETURN_UNKNOWN_FUNCTION;
+		}
+		break;
+	case OPTEE_SMC_GET_ASYNC_NOTIF_VALUE:
+		if (IS_ENABLED(CFG_CORE_ASYNC_NOTIF))
+			get_async_notif_value(args);
+		else
+			args->a0 = OPTEE_SMC_RETURN_UNKNOWN_FUNCTION;
+		break;
+
+	/* Watchdog entry if handler ID is defined in TOS range */
+	case CFG_WDT_SM_HANDLER_ID:
+		tee_entry_watchdog(args);
+		break;
 
 	default:
 		args->a0 = OPTEE_SMC_RETURN_UNKNOWN_FUNCTION;
@@ -194,7 +320,12 @@ size_t tee_entry_generic_get_api_call_count(void)
 	 * target has additional calls it will call this function and
 	 * add the number of calls the target has added.
 	 */
-	return 9;
+	size_t ret = 12;
+
+	if (IS_ENABLED(CFG_NS_VIRTUALIZATION))
+		ret += 2;
+
+	return ret;
 }
 
 void __weak tee_entry_get_api_call_count(struct thread_smc_args *args)
@@ -228,4 +359,5 @@ void __weak tee_entry_get_os_revision(struct thread_smc_args *args)
 {
 	args->a0 = CFG_OPTEE_REVISION_MAJOR;
 	args->a1 = CFG_OPTEE_REVISION_MINOR;
+	args->a2 = TEE_IMPL_GIT_SHA1;
 }

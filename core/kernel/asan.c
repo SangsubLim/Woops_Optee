@@ -1,38 +1,23 @@
+// SPDX-License-Identifier: BSD-2-Clause
 /*
  * Copyright (c) 2016, Linaro Limited
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice,
- * this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- * this list of conditions and the following disclaimer in the documentation
- * and/or other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
  */
 
 #include <assert.h>
 #include <compiler.h>
-#include <kernel/panic.h>
+#include <keep.h>
 #include <kernel/asan.h>
+#include <kernel/panic.h>
 #include <string.h>
+#include <trace.h>
 #include <types_ext.h>
 #include <util.h>
-#include <trace.h>
+
+#if __GCC_VERSION >= 70000
+#define ASAN_ABI_VERSION 7
+#else
+#define ASAN_ABI_VERSION 6
+#endif
 
 struct asan_source_location {
 	const char *file_name;
@@ -48,25 +33,28 @@ struct asan_global {
 	const char *module_name;
 	uintptr_t has_dynamic_init;
 	struct asan_source_location *location;
+#if ASAN_ABI_VERSION >= 7
+	uintptr_t odr_indicator;
+#endif
 };
 
 static vaddr_t asan_va_base;
 static size_t asan_va_size;
 static bool asan_active;
 
-static int8_t *va_to_shadow(void *va)
+static int8_t *va_to_shadow(const void *va)
 {
 	vaddr_t sa = ((vaddr_t)va / ASAN_BLOCK_SIZE) + CFG_ASAN_SHADOW_OFFSET;
 
 	return (int8_t *)sa;
 }
 
-static size_t va_range_to_shadow_size(void *begin, void *end)
+static size_t va_range_to_shadow_size(const void *begin, const void *end)
 {
 	return ((vaddr_t)end - (vaddr_t)begin) / ASAN_BLOCK_SIZE;
 }
 
-static bool va_range_inside_shadow(void *begin, void *end)
+static bool va_range_inside_shadow(const void *begin, const void *end)
 {
 	vaddr_t b = (vaddr_t)begin;
 	vaddr_t e = (vaddr_t)end;
@@ -76,7 +64,7 @@ static bool va_range_inside_shadow(void *begin, void *end)
 	return (b >= asan_va_base) && (e <= (asan_va_base + asan_va_size));
 }
 
-static bool va_range_outside_shadow(void *begin, void *end)
+static bool va_range_outside_shadow(const void *begin, const void *end)
 {
 	vaddr_t b = (vaddr_t)begin;
 	vaddr_t e = (vaddr_t)end;
@@ -86,17 +74,17 @@ static bool va_range_outside_shadow(void *begin, void *end)
 	return (e <= asan_va_base) || (b >= (asan_va_base + asan_va_size));
 }
 
-static size_t va_misalignment(void *va)
+static size_t va_misalignment(const void *va)
 {
 	return (vaddr_t)va & ASAN_BLOCK_MASK;
 }
 
-static bool va_is_well_aligned(void *va)
+static bool va_is_well_aligned(const void *va)
 {
 	return !va_misalignment(va);
 }
 
-void asan_set_shadowed(void *begin, void *end)
+void asan_set_shadowed(const void *begin, const void *end)
 {
 	vaddr_t b = (vaddr_t)begin;
 	vaddr_t e = (vaddr_t)end;
@@ -110,30 +98,31 @@ void asan_set_shadowed(void *begin, void *end)
 	asan_va_size = e - b;
 }
 
-void asan_tag_no_access(void *begin, void *end)
+void asan_tag_no_access(const void *begin, const void *end)
 {
 	assert(va_is_well_aligned(begin));
 	assert(va_is_well_aligned(end));
 	assert(va_range_inside_shadow(begin, end));
 
-	memset(va_to_shadow(begin), ASAN_DATA_RED_ZONE,
-	       va_range_to_shadow_size(begin, end));
+	asan_memset_unchecked(va_to_shadow(begin), ASAN_DATA_RED_ZONE,
+			      va_range_to_shadow_size(begin, end));
 }
 
-void asan_tag_access(void *begin, void *end)
+void asan_tag_access(const void *begin, const void *end)
 {
-	if (!asan_va_base)
+	if (!asan_va_base || (begin == end))
 		return;
 
 	assert(va_range_inside_shadow(begin, end));
 	assert(va_is_well_aligned(begin));
 
-	memset(va_to_shadow(begin), 0, va_range_to_shadow_size(begin, end));
+	asan_memset_unchecked(va_to_shadow(begin), 0,
+			      va_range_to_shadow_size(begin, end));
 	if (!va_is_well_aligned(end))
 		*va_to_shadow(end) = ASAN_BLOCK_SIZE - va_misalignment(end);
 }
 
-void asan_tag_heap_free(void *begin, void *end)
+void asan_tag_heap_free(const void *begin, const void *end)
 {
 	if (!asan_va_base)
 		return;
@@ -142,8 +131,33 @@ void asan_tag_heap_free(void *begin, void *end)
 	assert(va_is_well_aligned(begin));
 	assert(va_is_well_aligned(end));
 
-	memset(va_to_shadow(begin), ASAN_HEAP_RED_ZONE,
-	       va_range_to_shadow_size(begin, end));
+	asan_memset_unchecked(va_to_shadow(begin), ASAN_HEAP_RED_ZONE,
+			      va_range_to_shadow_size(begin, end));
+}
+
+__inhibit_loop_to_libcall void *asan_memset_unchecked(void *s, int c, size_t n)
+{
+	uint8_t *b = s;
+	size_t m;
+
+	for (m = 0; m < n; m++)
+		b[m] = c;
+
+	return s;
+}
+
+__inhibit_loop_to_libcall
+void *asan_memcpy_unchecked(void *__restrict dst, const void *__restrict src,
+			    size_t len)
+{
+	uint8_t *__restrict d = dst;
+	const uint8_t *__restrict s = src;
+	size_t n;
+
+	for (n = 0; n < len; n++)
+		d[n] = s[n];
+
+	return dst;
 }
 
 void asan_start(void)
@@ -170,8 +184,8 @@ static void check_access(vaddr_t addr, size_t size)
 	if (!va_range_inside_shadow(begin, end))
 		panic();
 
-	e = va_to_shadow(end);
-	for (a = va_to_shadow(begin); a != e; a++)
+	e = va_to_shadow((void *)(addr + size - 1));
+	for (a = va_to_shadow(begin); a <= e; a++)
 		if (*a < 0)
 			panic();
 
@@ -249,9 +263,8 @@ void __noreturn __asan_report_store_n_noabort(vaddr_t addr, size_t size)
 }
 
 void __asan_handle_no_return(void);
-void __noreturn __asan_handle_no_return(void)
+void __asan_handle_no_return(void)
 {
-	panic();
 }
 
 void __asan_register_globals(struct asan_global *globals, size_t size);
@@ -263,6 +276,7 @@ void __asan_register_globals(struct asan_global *globals, size_t size)
 		asan_tag_access((void *)globals[n].beg,
 				(void *)(globals[n].beg + globals[n].size));
 }
+DECLARE_KEEP_INIT(__asan_register_globals);
 
 void __asan_unregister_globals(struct asan_global *globals, size_t size);
 void __asan_unregister_globals(struct asan_global *globals __unused,

@@ -1,79 +1,71 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
+# SPDX-License-Identifier: BSD-2-Clause
 #
 # Copyright (c) 2015, Linaro Limited
-# All rights reserved.
-#
-# Redistribution and use in source and binary forms, with or without
-# modification, are permitted provided that the following conditions are met:
-#
-# 1. Redistributions of source code must retain the above copyright notice,
-# this list of conditions and the following disclaimer.
-#
-# 2. Redistributions in binary form must reproduce the above copyright notice,
-# this list of conditions and the following disclaimer in the documentation
-# and/or other materials provided with the distribution.
-#
-# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
-# ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
-# LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
-# CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
-# SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
-# INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
-# CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
-# ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
-# POSSIBILITY OF SUCH DAMAGE.
-#
+
 
 def get_args():
-	import argparse
+    import argparse
 
-	parser = argparse.ArgumentParser()
-	parser.add_argument('--prefix', required=True, \
-		help='Prefix for the public key exponent and modulus in c file')
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        '--prefix', required=True,
+        help='Prefix for the public key exponent and modulus in c file')
+    parser.add_argument(
+        '--out', required=True,
+        help='Name of c file for the public key')
+    parser.add_argument('--key', required=True, help='Name of key file')
 
-	parser.add_argument('--out', required=True, \
-		help='Name of c file for the public key')
+    return parser.parse_args()
 
-	parser.add_argument('--key', required=True, help='Name of key file')
-
-	return parser.parse_args()
 
 def main():
-	import array
-	from Crypto.PublicKey import RSA
-	from Crypto.Util.number import long_to_bytes
+    import array
+    from cryptography.hazmat.backends import default_backend
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
 
-	args = get_args();
+    args = get_args()
 
-	f = open(args.key, 'r')
-	key = RSA.importKey(f.read())
-	f.close
+    with open(args.key, 'rb') as f:
+        data = f.read()
 
-	f = open(args.out, 'w')
+        try:
+            key = serialization.load_pem_private_key(data, password=None,
+                                                     backend=default_backend())
+            key = key.public_key()
+        except ValueError:
+            key = serialization.load_pem_public_key(data,
+                                                    backend=default_backend())
 
-	f.write("#include <stdint.h>\n");
-	f.write("#include <stddef.h>\n\n");
+    # Refuse public exponent with more than 32 bits. Otherwise the C
+    # compiler may simply truncate the value and proceed.
+    # This will lead to TAs seemingly having invalid signatures with a
+    # possible security issue for any e = k*2^32 + 1 (for any integer k).
+    if key.public_numbers().e > 0xffffffff:
+        raise ValueError(
+            'Unsupported large public exponent detected. ' +
+            'OP-TEE handles only public exponents up to 2^32 - 1.')
 
-	f.write("const uint32_t " + args.prefix + "_exponent = " +
-		str(key.publickey().e) + ";\n\n")
+    with open(args.out, 'w') as f:
+        f.write("#include <stdint.h>\n")
+        f.write("#include <stddef.h>\n\n")
+        f.write("const uint32_t " + args.prefix + "_exponent = " +
+                str(key.public_numbers().e) + ";\n\n")
+        f.write("const uint8_t " + args.prefix + "_modulus[] = {\n")
+        i = 0
+        nbuf = key.public_numbers().n.to_bytes(key.key_size >> 3, 'big')
+        for x in array.array("B", nbuf):
+            f.write("0x" + '{0:02x}'.format(x) + ",")
+            i = i + 1
+            if i % 8 == 0:
+                f.write("\n")
+            else:
+                f.write(" ")
+        f.write("};\n")
+        f.write("const size_t " + args.prefix + "_modulus_size = sizeof(" +
+                args.prefix + "_modulus);\n")
 
-	f.write("const uint8_t " + args.prefix + "_modulus[] = {\n")
-	i = 0;
-	for x in array.array("B", long_to_bytes(key.publickey().n)):
-		f.write("0x" + '{0:02x}'.format(x) + ",")
-		i = i + 1;
-		if i % 8 == 0:
-			f.write("\n");
-		else:
-			f.write(" ");
-	f.write("};\n");
-
-	f.write("const size_t " + args.prefix + "_modulus_size = sizeof(" + \
-		args.prefix + "_modulus);\n")
-
-	f.close()
 
 if __name__ == "__main__":
-	main()
+    main()

@@ -1,108 +1,41 @@
+/* SPDX-License-Identifier: BSD-2-Clause */
 /*
  * Copyright (c) 2014-2016, Linaro Limited
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice,
- * this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- * this list of conditions and the following disclaimer in the documentation
- * and/or other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
  */
 
 #ifndef PLATFORM_CONFIG_H
 #define PLATFORM_CONFIG_H
 
+#include <util.h>
+#include <mm/generic_ram_layout.h>
+
 /* Below are platform/SoC settings specific to stm platform flavors */
 
 #if defined(PLATFORM_FLAVOR_b2260)
 
-#define CFG_TEE_CORE_NB_CORE	2
-
-#ifndef CFG_DDR_START
-#define CFG_DDR_START		0x40000000
-#define CFG_DDR_SIZE		0x40000000
-#endif
-#ifndef CFG_DDR_TEETZ_RESERVED_START
-#define CFG_DDR_TEETZ_RESERVED_START	0x7E000000
-#define CFG_DDR_TEETZ_RESERVED_SIZE	0x01E00000
-#endif
-#ifndef CFG_CORE_TZSRAM_EMUL_START
-#define CFG_CORE_TZSRAM_EMUL_START	0x7FE00000
-#endif
-
 #define CPU_IOMEM_BASE		0x08760000
+#define CPU_IOMEM_SIZE		0x000a0000
 #define CPU_PORT_FILT_START	0x40000000
 #define CPU_PORT_FILT_END	0xC0000000
-#define STXHxxx_LPM_PERIPH_BASE	0x09700000
+#define STXHXXX_LPM_PERIPH_BASE	0x09700000
 #define RNG_BASE		0x08A89000
+#define RNG_SIZE		0x00001000
 
 #define ASC_NUM			21
 #define UART_CONSOLE_BASE	ST_ASC21_REGS_BASE
 
 #elif defined(PLATFORM_FLAVOR_cannes)
 
-#define CFG_TEE_CORE_NB_CORE	2
-
-#ifndef CFG_DDR_START
-#define CFG_DDR_START		0x40000000
-#define CFG_DDR_SIZE		0x80000000
-#endif
-#ifndef CFG_DDR_TEETZ_RESERVED_START
-#define CFG_DDR_TEETZ_RESERVED_START	0x93a00000
-#define CFG_DDR_TEETZ_RESERVED_SIZE	0x01000000
-#endif
-#ifndef CFG_CORE_TZSRAM_EMUL_START
-#define CFG_CORE_TZSRAM_EMUL_START	0x94a00000
-#endif
-
 #define CPU_IOMEM_BASE		0x08760000
+#define CPU_IOMEM_SIZE		0x000a0000
 #define CPU_PORT_FILT_START	0x40000000
 #define CPU_PORT_FILT_END	0xC0000000
-#define STXHxxx_LPM_PERIPH_BASE	0x09400000
+#define STXHXXX_LPM_PERIPH_BASE	0x09400000
 #define RNG_BASE		0x08A89000
+#define RNG_SIZE		0x00001000
 
 #define ASC_NUM			20
 #define UART_CONSOLE_BASE	ST_ASC20_REGS_BASE
-
-#elif defined(PLATFORM_FLAVOR_orly2)
-
-#define CFG_TEE_CORE_NB_CORE	2
-
-#ifndef CFG_DDR_START
-#define CFG_DDR_START		0x40000000
-#define CFG_DDR_SIZE		0x40000000
-#define CFG_DDR1_START		0x80000000
-#define CFG_DDR1_SIZE		0x40000000
-#endif
-#ifndef CFG_DDR_TEETZ_RESERVED_START
-#define CFG_DDR_TEETZ_RESERVED_START	0x8F000000
-#define CFG_DDR_TEETZ_RESERVED_SIZE	0x00800000
-#endif
-
-#define CPU_IOMEM_BASE		0xFFFE0000
-#define CPU_PORT_FILT_START	0x40000000
-#define CPU_PORT_FILT_END	0x80000000
-#define STXHxxx_LPM_PERIPH_BASE	0xFE400000
-#define RNG_BASE		0xFEE80000
-
-#define ASC_NUM			21
-#define UART_CONSOLE_BASE	ST_ASC21_REGS_BASE
 
 #else /* defined(PLATFORM_FLAVOR_xxx) */
 
@@ -110,7 +43,17 @@
 
 #endif /* defined(PLATFORM_FLAVOR_xxx) */
 
+#define PL310_BASE		(CPU_IOMEM_BASE + 0x2000)
+#define GIC_DIST_BASE		(CPU_IOMEM_BASE + 0x1000)
+#define SCU_BASE		(CPU_IOMEM_BASE + 0x0000)
+#define GIC_CPU_BASE		(CPU_IOMEM_BASE + 0x0100)
+#define ST_ASC20_REGS_BASE	(STXHXXX_LPM_PERIPH_BASE + 0x00130000)
+#define ST_ASC21_REGS_BASE	(STXHXXX_LPM_PERIPH_BASE + 0x00131000)
+
 /* Below are settings common to stm platform flavors */
+
+/* Make stacks aligned to data cache line length */
+#define STACK_ALIGNMENT		32
 
 /*
  * CP15 Secure ConTroL Register (SCTLR
@@ -126,7 +69,6 @@
  * - L2 write full line of zero disabled (bit3=0)
  *   (keep WFLZ low. Will be set once outer L2 is ready)
  */
-
 #define CPU_ACTLR_INIT			0x00000041
 
 /*
@@ -235,106 +177,34 @@
 #define SCU_CTRL_INIT			0x00000065
 
 /*
- * TEE RAM layout without CFG_WITH_PAGER:
- *
- *  +---------------------------------------+  <- CFG_DDR_TEETZ_RESERVED_START
- *  | TEE private secure |  TEE_RAM         |   ^
- *  |   external memory  +------------------+   |
- *  |                    |  TA_RAM          |   |
- *  +---------------------------------------+   | CFG_DDR_TEETZ_RESERVED_SIZE
- *  |     Non secure     |  SHM             |   |
- *  |   shared memory    |                  |   |
- *  +---------------------------------------+   v
- *
- *  TEE_RAM : default 1MByte
- *  PUB_RAM : default 2MByte
- *  TA_RAM  : all what is left
- *
- * ----------------------------------------------------------------------------
- * TEE RAM layout with CFG_WITH_PAGER=y:
- *
- *  +---------------------------------------+  <- CFG_CORE_TZSRAM_EMUL_START
- *  | TEE private highly | TEE_RAM          |   ^
- *  |   secure memory    |                  |   | CFG_CORE_TZSRAM_EMUL_SIZE
- *  +---------------------------------------+   v
- *
- *  +---------------------------------------+  <- CFG_DDR_TEETZ_RESERVED_START
- *  | TEE private secure |  TA_RAM          |   ^
- *  |   external memory  |                  |   |
- *  +---------------------------------------+   | CFG_DDR_TEETZ_RESERVED_SIZE
- *  |     Non secure     |  SHM             |   |
- *  |   shared memory    |                  |   |
- *  +---------------------------------------+   v
- *
- *  TEE_RAM : default 256kByte
- *  TA_RAM  : all what is left in DDR TEE reserved area
- *  PUB_RAM : default 2MByte
+ * Register non-secure DDR chunks for dynamic shared memory: these are
+ * DDR ranges that do not include OP-TEE secure memory.
+ * Some Stm platforms may reserve beginning of the DDR for non REE memory.
  */
 
-/* default locate shared memory at the end of the TEE reserved DDR */
-#ifndef CFG_SHMEM_SIZE
-#define CFG_SHMEM_SIZE		(2 * 1024 * 1024)
+#ifdef CFG_DDR_START
+/* Carvout out secure RAM range (emulated SRAM is expected near DRAM) */
+#if defined(CFG_WITH_PAGER) && defined(TZSRAM_BASE)
+#if TZSRAM_BASE >= CFG_DDR_START
+#define STM_SECDDR_BASE		MIN_UNSAFE(TZSRAM_BASE, TZDRAM_BASE)
+#define STM_SECDDR_END		MAX_UNSAFE(TZSRAM_BASE + TZSRAM_SIZE, \
+					   TZDRAM_BASE + TZDRAM_SIZE)
+#endif /*TZSRAM_BASE >= CFG_DDR_START*/
+#endif /*CFG_WITH_PAGER && TZSRAM_BASE*/
+
+#ifndef STM_SECDDR_BASE
+#define STM_SECDDR_BASE		TZDRAM_BASE
+#define STM_SECDDR_END		(TZDRAM_BASE + TZDRAM_SIZE)
 #endif
 
-#ifndef CFG_SHMEM_START
-#define CFG_SHMEM_START		(CFG_DDR_TEETZ_RESERVED_START + \
-				CFG_DDR_TEETZ_RESERVED_SIZE - \
-				CFG_SHMEM_SIZE)
+#define STM_SECDDR_SIZE		(STM_SECDDR_END - STM_SECDDR_BASE)
+/* Register the DDR chunks that do not intersect the secure DDR single area */
+#define DRAM0_BASE		(CFG_DDR_START + CFG_STM_RSV_DRAM_STARTBYTES)
+#define DRAM0_SIZE		(STM_SECDDR_BASE - DRAM0_BASE)
+#if (STM_SECDDR_END < 0x80000000ULL)
+#define DRAM1_BASE		STM_SECDDR_END
+#define DRAM1_SIZE		((CFG_DDR_START - DRAM1_BASE) + CFG_DDR_SIZE)
 #endif
-
-#if defined(CFG_WITH_PAGER)
-
-#define TZSRAM_BASE		CFG_CORE_TZSRAM_EMUL_START
-#define TZSRAM_SIZE		CFG_CORE_TZSRAM_EMUL_SIZE
-
-#define TZDRAM_BASE		CFG_DDR_TEETZ_RESERVED_START
-#define TZDRAM_SIZE		(CFG_DDR_TEETZ_RESERVED_SIZE - CFG_SHMEM_SIZE)
-
-#define CFG_TEE_RAM_START	TZSRAM_BASE
-#define CFG_TEE_RAM_PH_SIZE	TZSRAM_SIZE
-
-#define CFG_TA_RAM_START	TZDRAM_BASE
-#define CFG_TA_RAM_SIZE		TZDRAM_SIZE
-
-#else  /* CFG_WITH_PAGER */
-
-#define TZDRAM_BASE		CFG_DDR_TEETZ_RESERVED_START
-#define TZDRAM_SIZE		(CFG_DDR_TEETZ_RESERVED_SIZE - CFG_SHMEM_SIZE)
-
-#define CFG_TEE_RAM_START	TZDRAM_BASE
-#ifndef CFG_TEE_RAM_PH_SIZE
-#define CFG_TEE_RAM_PH_SIZE	(1 * 1024 * 1024)
-#endif
-
-#define CFG_TA_RAM_START	(TZDRAM_BASE + CFG_TEE_RAM_PH_SIZE)
-#define CFG_TA_RAM_SIZE		(TZDRAM_SIZE - CFG_TEE_RAM_PH_SIZE)
-
-#endif /* !CFG_WITH_PAGER */
-
-/* External DDR dies */
-#define DRAM0_BASE		CFG_DDR_START
-#define DRAM0_SIZE		CFG_DDR_SIZE
-#ifdef CFG_DDR1_START
-#define DRAM1_BASE		CFG_DDR1_START
-#define DRAM1_SIZE		CFG_DDR1_SIZE
-#endif
-
-#ifndef CFG_TEE_RAM_VA_SIZE
-#define CFG_TEE_RAM_VA_SIZE	(1024 * 1024)
-#endif
-
-#ifndef CFG_TEE_LOAD_ADDR
-#define CFG_TEE_LOAD_ADDR	CFG_TEE_RAM_START
-#endif
-
-#define PL310_BASE		(CPU_IOMEM_BASE + 0x2000)
-#define GIC_DIST_BASE		(CPU_IOMEM_BASE + 0x1000)
-#define SCU_BASE		(CPU_IOMEM_BASE + 0x0000)
-#define GIC_CPU_BASE		(CPU_IOMEM_BASE + 0x0100)
-#define ST_ASC20_REGS_BASE	(STXHxxx_LPM_PERIPH_BASE + 0x00130000)
-#define ST_ASC21_REGS_BASE	(STXHxxx_LPM_PERIPH_BASE + 0x00131000)
-
-/* Make stacks aligned to data cache line length */
-#define STACK_ALIGNMENT		32
+#endif /*CFG_DDR_START*/
 
 #endif /* PLATFORM_CONFIG_H */

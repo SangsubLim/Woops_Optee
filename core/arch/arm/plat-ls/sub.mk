@@ -1,4 +1,3 @@
 global-incdirs-y += .
 srcs-y += main.c
-srcs-y += ls_core_pos.S
-srcs-y += plat_init.S
+srcs-$(CFG_ARM32_core) += plat_init.S

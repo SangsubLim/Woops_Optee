@@ -1,6 +1,8 @@
+// SPDX-License-Identifier: BSD-2-Clause
 /*
  * Copyright (C) 2015 Freescale Semiconductor, Inc.
  * All rights reserved.
+ * Copyright 2018-2019 NXP.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -25,12 +27,13 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include <platform_config.h>
-
+#include <assert.h>
 #include <drivers/imx_uart.h>
-#include <console.h>
 #include <io.h>
-#include <compiler.h>
+#include <keep.h>
+#include <kernel/dt.h>
+#include <kernel/dt_driver.h>
+#include <util.h>
 
 /* Register definitions */
 #define URXD  0x0  /* Receiver Register */
@@ -48,6 +51,7 @@
 #define UBMR  0xa8 /* BRM Modulator Register */
 #define UBRC  0xac /* Baud Rate Count Register */
 #define UTS   0xb4 /* UART Test Register (mx31) */
+#define USIZE 0xb8 /* UTS + sizeof(uint32_t) */
 
 /* UART Control Register Bit Fields.*/
 #define  URXD_CHARRDY    (1<<15)
@@ -80,33 +84,120 @@
 #define  UTS_RXFULL	 (1<<3)	 /* RxFIFO full */
 #define  UTS_SOFTRST	 (1<<0)	 /* Software reset */
 
-void imx_uart_init(vaddr_t __unused vbase)
+static vaddr_t chip_to_base(struct serial_chip *chip)
 {
+	struct imx_uart_data *pd =
+		container_of(chip, struct imx_uart_data, chip);
+
+	return io_pa_or_va(&pd->base, USIZE);
+}
+
+static void imx_uart_flush(struct serial_chip *chip)
+{
+	vaddr_t base = chip_to_base(chip);
+
+
+	while (!(io_read32(base + UTS) & UTS_TXEMPTY))
+		if (!(io_read32(base + UCR1) & UCR1_UARTEN))
+			return;
+}
+
+static int imx_uart_getchar(struct serial_chip *chip)
+{
+	vaddr_t base = chip_to_base(chip);
+
+	while (io_read32(base + UTS) & UTS_RXEMPTY)
+		;
+
+	return (io_read32(base + URXD) & URXD_RX_DATA);
+}
+
+static void imx_uart_putc(struct serial_chip *chip, int ch)
+{
+	vaddr_t base = chip_to_base(chip);
+
+	/* Wait until there's space in the TX FIFO */
+	while (io_read32(base + UTS) & UTS_TXFULL)
+		if (!(io_read32(base + UCR1) & UCR1_UARTEN))
+			return;
+
+	io_write32(base + UTXD, ch);
+}
+
+static const struct serial_ops imx_uart_ops = {
+	.flush = imx_uart_flush,
+	.getchar = imx_uart_getchar,
+	.putc = imx_uart_putc,
+};
+DECLARE_KEEP_PAGER(imx_uart_ops);
+
+void imx_uart_init(struct imx_uart_data *pd, paddr_t base)
+{
+	pd->base.pa = base;
+	pd->chip.ops = &imx_uart_ops;
+
 	/*
 	 * Do nothing, debug uart(uart0) share with normal world,
-	 * everything for uart0 intialization is done in bootloader.
+	 * everything for uart0 initialization is done in bootloader.
 	 */
 }
 
-void imx_uart_flush_tx_fifo(vaddr_t base)
+#ifdef CFG_DT
+static struct serial_chip *imx_uart_dev_alloc(void)
 {
-	while (!(read32(base + UTS) & UTS_TXEMPTY))
-		;
+	struct imx_uart_data *pd = calloc(1, sizeof(*pd));
+
+	if (!pd)
+		return NULL;
+
+	return &pd->chip;
 }
 
-int imx_uart_getchar(vaddr_t base)
+static int imx_uart_dev_init(struct serial_chip *chip, const void *fdt,
+			     int offs, const char *parms)
 {
-	while (read32(base + UTS) & UTS_RXEMPTY)
-		;
+	struct imx_uart_data *pd =
+		container_of(chip, struct imx_uart_data, chip);
+	vaddr_t vbase = 0;
+	paddr_t pbase = 0;
+	size_t size = 0;
 
-	return (read32(base + URXD) & URXD_RX_DATA);
+	if (parms && parms[0])
+		IMSG("imx_uart: device parameters ignored (%s)", parms);
+
+	if (dt_map_dev(fdt, offs, &vbase, &size, DT_MAP_AUTO) < 0)
+		return -1;
+
+	pbase = virt_to_phys((void *)vbase);
+	imx_uart_init(pd, pbase);
+
+	return 0;
 }
 
-void imx_uart_putc(const char c, vaddr_t base)
+static void imx_uart_dev_free(struct serial_chip *chip)
 {
-	write32(c, base + UTXD);
+	struct imx_uart_data *pd =
+		container_of(chip, struct imx_uart_data, chip);
 
-	/* wait until sent */
-	while (!(read32(base + UTS) & UTS_TXEMPTY))
-		;
+	free(pd);
 }
+
+static const struct serial_driver imx_uart_driver = {
+	.dev_alloc = imx_uart_dev_alloc,
+	.dev_init = imx_uart_dev_init,
+	.dev_free = imx_uart_dev_free,
+};
+
+static const struct dt_device_match imx_match_table[] = {
+	{ .compatible = "fsl,imx6q-uart" },
+	{ 0 }
+};
+
+DEFINE_DT_DRIVER(imx_dt_driver) = {
+	.name = "imx_uart",
+	.type = DT_DRIVER_UART,
+	.match_table = imx_match_table,
+	.driver = &imx_uart_driver,
+};
+
+#endif /* CFG_DT */

@@ -24,3 +24,19 @@ $(eval _O:=$(if $(O),$(O),.))$(wildcard $(addprefix $(_O)/,$(call _reverse,
 	$(sort $(foreach d,$(patsubst $(_O)/%,%,$(dir $(cleanfiles))),
 			   $(call enum-parent-dirs,$(d)))))))
 endef
+
+RMDIR := rmdir --ignore-fail-on-non-empty
+
+# Remove files with "rm -f".
+# Split (possibly huge) file list into more manageable lines
+# (200 files at a time), to minimize the odds of having:
+# "/bin/bash: Argument list too long"
+define do-rm-f
+        $(call _do-rm-f, $(wordlist 1, 200, $(1))) \
+        $(eval _tail := $(wordlist 201, $(words $(1)), $(1)))
+        $(if $(_tail), $(call do-rm-f, $(_tail)))
+endef
+
+define _do-rm-f
+        ${q}rm -f $1
+endef

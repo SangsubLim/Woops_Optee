@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: BSD-3-Clause */
 /*
  * Copyright (c) 1994-2009  Red Hat, Inc.
  * All rights reserved.
@@ -49,6 +50,8 @@
 #define TYPE(x)
 #define SIZE(x)
 #endif
+
+	.section .note.GNU-stack,"",%progbits
 
 /* Arm/Thumb interworking support:
 
@@ -203,7 +206,9 @@ SYM (\name):
 	mov		ip, sp
 	stmea		a1!, { v1-v7, fp, ip, lr }
 #else
-	stmea		a1!, { v1-v7, fp, ip, sp, lr }
+	stmea		a1!, { v1-v7, fp, ip}
+	str 		sp, [a1], #4
+	str 		lr, [a1], #4
 #endif
 	
 #if 0	/* Simulator does not cope with FP instructions yet.  */
@@ -212,6 +217,18 @@ SYM (\name):
 	sfmea		f4, 4, [a1]
 #endif
 #endif		
+
+#ifdef CFG_FTRACE_SUPPORT
+	stmdb		sp!, { lr }
+	/*
+	 * As ftrace is supported in ARM mode only, so hardcode jmp_buf
+	 * offset used to save ftrace return index.
+	 */
+	add		a1, a1, #48
+	bl		ftrace_setjmp
+	ldmia		sp!, { lr }
+#endif
+
 	/* When setting up the jump buffer return 0.  */
 	mov		a1, #0
 
@@ -225,12 +242,25 @@ SYM (\name):
 
 	/* If we have stack extension code it ought to be handled here.  */
 	
+#ifdef CFG_FTRACE_SUPPORT
+	stmdb		sp!, { a1, a2, lr }
+	/*
+	 * As ftrace is supported in ARM mode only, so hardcode jmp_buf
+	 * offset used to restore ftrace return stack.
+	 */
+	add		a1, a1, #92
+	bl		ftrace_longjmp
+	ldmia		sp!, { a1, a2, lr }
+#endif
+
 	/* Restore the registers, retrieving the state when setjmp() was called.  */
 #ifdef __thumb2__
 	ldmfd		a1!, { v1-v7, fp, ip, lr }
 	mov		sp, ip
 #else
-	ldmfd		a1!, { v1-v7, fp, ip, sp, lr }
+	ldmfd		a1!, { v1-v7, fp, ip }
+	ldr		sp, [a1], #4
+	ldr 		lr, [a1], #4
 #endif
 	
 #if 0	/* Simulator does not cope with FP instructions yet.  */

@@ -1,44 +1,24 @@
+/* SPDX-License-Identifier: BSD-2-Clause */
 /*
  * Copyright (c) 2015, Linaro Limited
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice,
- * this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- * this list of conditions and the following disclaimer in the documentation
- * and/or other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
  */
-#ifndef KEEP_H
-#define KEEP_H
+#ifndef __KEEP_H
+#define __KEEP_H
 
-#ifdef ASM
+#ifdef __ASSEMBLER__
 
-	.macro KEEP_PAGER sym
-	.pushsection __keep_meta_vars_pager
-	___keep_pager_\sym:
+	.macro DECLARE_KEEP_PAGER sym
+	.pushsection __keep_meta_vars_pager, "a"
+	.global ____keep_pager_\sym
+	____keep_pager_\sym:
 	.long	\sym
 	.popsection
 	.endm
 
-	.macro KEEP_INIT sym
-	.pushsection __keep_meta_vars_init
-	___keep_init_\sym:
+	.macro DECLARE_KEEP_INIT sym
+	.pushsection __keep_meta_vars_init, "a"
+	.global ____keep_init_\sym
+	____keep_init_\sym:
 	.long	\sym
 	.popsection
 	.endm
@@ -47,14 +27,22 @@
 
 #include <compiler.h>
 
-#define KEEP_PAGER(sym) \
-	const unsigned long ____keep_pager_##sym  \
-		__section("__keep_meta_vars_pager") = (unsigned long)&sym
+#define __DECLARE_KEEP_PAGER2(sym, file_id) \
+	extern const unsigned long ____keep_pager_##sym; \
+	const unsigned long ____keep_pager_##sym##_##file_id  \
+		__section("__keep_meta_vars_pager") = (unsigned long)&(sym)
 
-#define KEEP_INIT(sym) \
-	const unsigned long ____keep_init_##sym  \
-		__section("__keep_meta_vars_init") = (unsigned long)&sym
+#define __DECLARE_KEEP_PAGER1(sym, file_id) __DECLARE_KEEP_PAGER2(sym, file_id)
+#define DECLARE_KEEP_PAGER(sym) __DECLARE_KEEP_PAGER1(sym, __FILE_ID__)
 
-#endif /* ASM */
+#define __DECLARE_KEEP_INIT2(sym, file_id) \
+	extern const unsigned long ____keep_init_##sym##file_id; \
+	const unsigned long ____keep_init_##sym##_##file_id  \
+		__section("__keep_meta_vars_init") = (unsigned long)&(sym)
 
-#endif /*KEEP_H*/
+#define __DECLARE_KEEP_INIT1(sym, file_id) __DECLARE_KEEP_INIT2(sym, file_id)
+#define DECLARE_KEEP_INIT(sym) __DECLARE_KEEP_INIT1(sym, __FILE_ID__)
+
+#endif /* __ASSEMBLER__ */
+
+#endif /*__KEEP_H*/

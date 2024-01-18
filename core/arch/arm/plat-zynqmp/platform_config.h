@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: BSD-2-Clause */
 /*
  * Copyright (c) 2016, Xilinx Inc.
  * All rights reserved.
@@ -28,88 +29,64 @@
 #ifndef PLATFORM_CONFIG_H
 #define PLATFORM_CONFIG_H
 
+#include <mm/generic_ram_layout.h>
+
 /* Make stacks aligned to data cache line length */
-#define STACK_ALIGNMENT		64
+#define CACHELINE_LEN		64
+#define STACK_ALIGNMENT		CACHELINE_LEN
 
 #ifdef CFG_WITH_PAGER
 #error "Pager not supported for zynqmp"
 #endif
 
+/* DDR Low area base */
+#define DRAM0_BASE		0
+
+#ifdef ARM64
+/* DDR High area base is only available when compiling for 64 bits */
+#define DRAM1_BASE		0x800000000
+#endif
+
+#ifdef CFG_CDNS_UART
+#define CONSOLE_UART_BASE		(CFG_UART_BASE)
+#define IT_CONSOLE_UART			(CFG_UART_IT)
+#define CONSOLE_UART_CLK_IN_HZ		(CFG_UART_CLK_HZ)
+#endif
+
 #if defined(PLATFORM_FLAVOR_zc1751_dc1) || \
 	defined(PLATFORM_FLAVOR_zc1751_dc2) || \
-	defined(PLATFORM_FLAVOR_zcu102)
+	defined(PLATFORM_FLAVOR_zcu102) || \
+	defined(PLATFORM_FLAVOR_zcu104) || \
+	defined(PLATFORM_FLAVOR_zcu106) || \
+	defined(PLATFORM_FLAVOR_ultra96)
 
 #define GIC_BASE		0xF9010000
 #define UART0_BASE		0xFF000000
-#define UART1_BASE		0xFF001000
+#define UART1_BASE		0xFF010000
 
 #define IT_UART0		53
 #define IT_UART1		54
 
 #define UART0_CLK_IN_HZ		100000000
 #define UART1_CLK_IN_HZ		100000000
-#define CONSOLE_UART_BASE	UART0_BASE
-#define IT_CONSOLE_UART		IT_UART0
-#define CONSOLE_UART_CLK_IN_HZ	UART0_CLK_IN_HZ
-
-#define DRAM0_BASE		0
-#define DRAM0_SIZE		0x80000000
-
-/* Location of trusted dram */
-#define TZDRAM_BASE		0x60000000
-#define TZDRAM_SIZE		0x10000000
-
-#define CFG_SHMEM_START		0x70000000
-#define CFG_SHMEM_SIZE		0x10000000
 
 #define GICD_OFFSET		0
-#define GICC_OFFSET		0x20000
+#define GICC_OFFSET		0x10000
 
 #else
 #error "Unknown platform flavor"
 #endif
 
-#define CFG_TEE_CORE_NB_CORE	4
+#define CSUDMA_BASE		0xFFC80000
+#define CSUDMA_SIZE		0x1000
+#define CSU_BASE		0xFFCA0000
+#define CSU_SIZE		0x5038
 
-#define CFG_TEE_RAM_VA_SIZE	(1024 * 1024)
-
-#ifndef CFG_TEE_LOAD_ADDR
-#define CFG_TEE_LOAD_ADDR	CFG_TEE_RAM_START
+#ifdef CFG_TEE_LOAD_ADDR
+#define TEE_LOAD_ADDR			CFG_TEE_LOAD_ADDR
+#else
+#define TEE_LOAD_ADDR			TEE_RAM_START
 #endif
-
-/*
- * Assumes that either TZSRAM isn't large enough or TZSRAM doesn't exist,
- * everything is in TZDRAM.
- * +------------------+
- * |        | TEE_RAM |
- * + TZDRAM +---------+
- * |        | TA_RAM  |
- * +--------+---------+
- */
-#define CFG_TEE_RAM_PH_SIZE	CFG_TEE_RAM_VA_SIZE
-#define CFG_TEE_RAM_START	TZDRAM_BASE
-#define CFG_TA_RAM_START	ROUNDUP((TZDRAM_BASE + CFG_TEE_RAM_VA_SIZE), \
-					CORE_MMU_DEVICE_SIZE)
-#define CFG_TA_RAM_SIZE		ROUNDDOWN((TZDRAM_SIZE - CFG_TEE_RAM_VA_SIZE), \
-					  CORE_MMU_DEVICE_SIZE)
-
-
-#define DEVICE0_PA_BASE		ROUNDDOWN(CONSOLE_UART_BASE, \
-					  CORE_MMU_DEVICE_SIZE)
-#define DEVICE0_VA_BASE		DEVICE0_PA_BASE
-#define DEVICE0_SIZE		CORE_MMU_DEVICE_SIZE
-#define DEVICE0_TYPE		MEM_AREA_IO_SEC
-
-#define DEVICE1_PA_BASE		ROUNDDOWN(GIC_BASE, CORE_MMU_DEVICE_SIZE)
-#define DEVICE1_VA_BASE		DEVICE1_PA_BASE
-#define DEVICE1_SIZE		CORE_MMU_DEVICE_SIZE
-#define DEVICE1_TYPE		MEM_AREA_IO_SEC
-
-#define DEVICE2_PA_BASE		ROUNDDOWN(GIC_BASE + GICD_OFFSET, \
-					  CORE_MMU_DEVICE_SIZE)
-#define DEVICE2_VA_BASE		DEVICE2_PA_BASE
-#define DEVICE2_SIZE		CORE_MMU_DEVICE_SIZE
-#define DEVICE2_TYPE		MEM_AREA_IO_SEC
 
 #ifndef UART_BAUDRATE
 #define UART_BAUDRATE		115200
